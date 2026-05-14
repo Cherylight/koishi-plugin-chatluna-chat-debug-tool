@@ -1,0 +1,67 @@
+{
+  "name": "koishi-plugin-chatluna-chat-debug-tool",
+  "description": "ChatLuna chat debugging logs with Markdown export and image previews.",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "lib/index.cjs",
+  "module": "lib/index.mjs",
+  "typings": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.mjs",
+      "require": "./lib/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ],
+  "homepage": "https://github.com/Cherylight/koishi-plugin-chatluna-chat-debug-tool",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cherylight/koishi-plugin-chatluna-chat-debug-tool.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Cherylight/koishi-plugin-chatluna-chat-debug-tool/issues"
+  },
+  "contributors": [
+    "cherylight"
+  ],
+  "keywords": [
+    "koishi",
+    "plugin",
+    "chatluna",
+    "debug",
+    "logging",
+    "markdown",
+    "image"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "koishi": "^4.18.0"
+  },
+  "dependencies": {
+    "koishi-plugin-chatluna": "^1.4.0-alpha.13"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.5",
+    "typescript": "^6.0.2"
+  },
+  "scripts": {
+    "build": "corepack yarn exec tsc --noEmit false && node build.mjs",
+    "build:types": "corepack yarn exec tsc --noEmit false",
+    "prepublishOnly": "corepack yarn build"
+  },
+  "koishi": {
+    "description": {
+      "zh": "ChatLuna 聊天调试日志导出为 Markdown，并可渲染为图片发送"
+    },
+    "service": {
+      "optional": [
+        "chatluna",
+        "puppeteer"
+      ]
+    }
+  }
+}

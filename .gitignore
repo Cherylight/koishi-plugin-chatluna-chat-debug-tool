@@ -1,0 +1,9 @@
+node_modules/
+lib/
+dist/
+*.log
+*.tgz
+
+
+(preview)panel_editAgent_9fb7d096.md
+plan-chatlunaChatDebugTool.prompt.prompt.md
