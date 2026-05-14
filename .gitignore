@@ -3,4 +3,5 @@ lib/
 dist/
 *.log
 *.tgz
+*.tsbuildinfo
 
