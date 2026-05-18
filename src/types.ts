@@ -3,8 +3,10 @@ export interface DebugCaptureConfig {
   captureEnabled: boolean
   writeMarkdown: boolean
   renderImageOnCommand: boolean
+  collapseJsonOnRender: boolean
+  collapseSystemPromptOnRender: boolean
+  embedChatImagesOnRender: boolean
   storageDir: string
-  maxBodyBytes: number
   maxPreviewChars: number
   redactHeaders: string[]
   captureFilters: string[]
@@ -12,7 +14,6 @@ export interface DebugCaptureConfig {
   mergeForwardBatchSize: number
   renderTimeoutMs: number
   imageMaxBytes: number
-  fallbackToFile: boolean
   managerPageSize: number
 }
 
@@ -87,6 +88,7 @@ export interface DebugEntry {
   toolCalls: DebugToolCall[]
   toolResults: DebugToolResult[]
   responseText: string
+  responseReasoningText?: string
   requestBodyText?: string
   requestBodyJson?: unknown
   responseJson?: unknown

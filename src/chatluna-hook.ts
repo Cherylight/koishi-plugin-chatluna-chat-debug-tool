@@ -165,10 +165,59 @@ function extractStructuredRequest(body: any): { messages: DebugMessagePart[]; to
   return { messages, toolCalls, toolResults }
 }
 
-function extractStructuredResponse(json: any): { messages: DebugMessagePart[]; toolCalls: DebugToolCall[]; toolResults: DebugToolResult[]; responseId?: string; resolvedModel?: string; usage?: unknown } {
+function extractReasoningText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === 'string') return ''
+      if (typeof part?.reasoning_content === 'string') return part.reasoning_content
+      if (typeof part?.reasoning === 'string') return part.reasoning
+      if (typeof part?.reasoning_text === 'string') return part.reasoning_text
+      if (part?.type === 'reasoning' && typeof part?.text === 'string') return part.text
+      return ''
+    }).join('')
+  }
+  if (!content || typeof content !== 'object') return ''
+
+  if (typeof (content as any).reasoning_content === 'string') return (content as any).reasoning_content
+  if (typeof (content as any).reasoning === 'string') return (content as any).reasoning
+  if (typeof (content as any).reasoning_text === 'string') return (content as any).reasoning_text
+  if ((content as any).type === 'reasoning' && typeof (content as any).text === 'string') return (content as any).text
+  return ''
+}
+
+function extractReasoningTextFromContent(content: unknown): string {
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === 'string') return ''
+      if (typeof part?.reasoning_content === 'string') return part.reasoning_content
+      if (typeof part?.reasoning === 'string') return part.reasoning
+      if (typeof part?.reasoning_text === 'string') return part.reasoning_text
+      if (part?.type === 'reasoning' && typeof part?.text === 'string') return part.text
+      return ''
+    }).join('')
+  }
+
+  if (!content || typeof content !== 'object') return ''
+  if ((content as any).type === 'reasoning' && typeof (content as any).text === 'string') return (content as any).text
+  return ''
+}
+
+function appendReasoningFragment(target: string[], content: unknown) {
+  const text = extractReasoningText(content)
+  if (text) target.push(text)
+}
+
+function appendReasoningContentFragment(target: string[], content: unknown) {
+  const text = extractReasoningTextFromContent(content)
+  if (text) target.push(text)
+}
+
+function extractStructuredResponse(json: any): { messages: DebugMessagePart[]; toolCalls: DebugToolCall[]; toolResults: DebugToolResult[]; reasoningText?: string; responseId?: string; resolvedModel?: string; usage?: unknown } {
   const messages: DebugMessagePart[] = []
   const toolCalls: DebugToolCall[] = []
   const toolResults: DebugToolResult[] = []
+  const reasoningFragments: string[] = []
 
   if (!json || typeof json !== 'object') {
     return { messages, toolCalls, toolResults }
@@ -177,6 +226,9 @@ function extractStructuredResponse(json: any): { messages: DebugMessagePart[]; t
   if (Array.isArray(json.output)) {
     for (const item of json.output) {
       if (item?.type === 'message') {
+        appendReasoningFragment(reasoningFragments, item?.reasoning)
+        appendReasoningFragment(reasoningFragments, item?.reasoning_content)
+        appendReasoningContentFragment(reasoningFragments, item?.content)
         messages.push({
           role: ['system', 'user', 'assistant', 'tool'].includes(item?.role) ? item.role : 'assistant',
           content: normalizeContent(item?.content),
@@ -204,6 +256,11 @@ function extractStructuredResponse(json: any): { messages: DebugMessagePart[]; t
     for (const choice of json.choices) {
       const message = choice?.message
       if (message) {
+        appendReasoningFragment(reasoningFragments, choice?.delta?.reasoning)
+        appendReasoningFragment(reasoningFragments, choice?.delta?.reasoning_content)
+        appendReasoningFragment(reasoningFragments, message?.reasoning)
+        appendReasoningFragment(reasoningFragments, message?.reasoning_content)
+        appendReasoningContentFragment(reasoningFragments, message?.content)
         messages.push({
           role: ['system', 'user', 'assistant', 'tool'].includes(message?.role) ? message.role : 'assistant',
           content: normalizeContent(message?.content),
@@ -228,6 +285,7 @@ function extractStructuredResponse(json: any): { messages: DebugMessagePart[]; t
     messages,
     toolCalls,
     toolResults,
+    reasoningText: reasoningFragments.join(''),
     responseId: typeof json?.id === 'string' ? json.id : typeof json?.response_id === 'string' ? json.response_id : undefined,
     resolvedModel: typeof json?.model === 'string' ? json.model : undefined,
     usage: json?.usage,
@@ -238,21 +296,6 @@ function shouldCapture(url: string, bodyText: string | undefined, config: DebugC
   if (!config.captureEnabled) return false
   if (!config.captureFilters.length) return true
   return config.captureFilters.some((filter) => url.includes(filter) || bodyText?.includes(filter))
-}
-
-function clipText(text: string, maxBytes: number): { text: string; truncated: boolean; bytes: number } {
-  const bytes = Buffer.byteLength(text)
-  if (bytes <= maxBytes) {
-    return { text, truncated: false, bytes }
-  }
-
-  let end = text.length
-  let clipped = text
-  while (end > 0 && Buffer.byteLength(clipped) > maxBytes) {
-    end = Math.max(0, end - Math.ceil(end / 8))
-    clipped = text.slice(0, end)
-  }
-  return { text: clipped, truncated: true, bytes }
 }
 
 function tryParseJson(text: string): unknown {
@@ -285,45 +328,78 @@ function mergeToolCallFragment(target: Record<number, any>, index: number, fragm
   target[index] = current
 }
 
-function aggregateSsePayload(rawText: string): { text: string; json?: unknown } {
-  const fragments: string[] = []
+function extractSseVisibleText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+
+  return content.map((part) => {
+    if (typeof part === 'string') return part
+    if (typeof part?.text === 'string') return part.text
+    if (typeof part?.output_text === 'string') return part.output_text
+    return ''
+  }).join('')
+}
+
+function appendSseChoiceText(target: Map<number, string[]>, index: number, content: unknown) {
+  const text = extractSseVisibleText(content)
+  if (!text) return
+
+  const fragments = target.get(index) ?? []
+  fragments.push(text)
+  target.set(index, fragments)
+}
+
+function appendSseChoiceReasoning(target: Map<number, string[]>, index: number, content: unknown) {
+  const text = extractReasoningText(content)
+  if (!text) return
+
+  const fragments = target.get(index) ?? []
+  fragments.push(text)
+  target.set(index, fragments)
+}
+
+function aggregateSsePayload(rawText: string): { text: string; reasoningText: string; json?: unknown; parsed: boolean } {
+  const outputTextFragments: string[] = []
+  const outputReasoningFragments: string[] = []
+  const choiceTexts = new Map<number, string[]>()
+  const choiceReasonings = new Map<number, string[]>()
   const choiceToolCalls = new Map<number, Record<number, any>>()
   let responseId: string | undefined
   let model: string | undefined
   let usage: unknown
+  let parsed = false
   const lines = rawText.split(/\r?\n/)
 
   for (const line of lines) {
     if (!line.startsWith('data:')) continue
     const payload = line.slice(5).trim()
     if (!payload || payload === '[DONE]') continue
-    const parsed = tryParseJson(payload) as any
-    if (!parsed || typeof parsed !== 'object') continue
+    const payloadJson = tryParseJson(payload) as any
+    if (!payloadJson || typeof payloadJson !== 'object') continue
 
-    if (typeof parsed.id === 'string') responseId = parsed.id
-    if (typeof parsed.response_id === 'string') responseId = parsed.response_id
-    if (typeof parsed.model === 'string') model = parsed.model
-    if (parsed.usage != null) usage = parsed.usage
+    parsed = true
 
-    const outputText = parsed.output_text
-    if (typeof outputText === 'string' && outputText) {
-      fragments.push(outputText)
+    if (typeof payloadJson.id === 'string') responseId = payloadJson.id
+    if (typeof payloadJson.response_id === 'string') responseId = payloadJson.response_id
+    if (typeof payloadJson.model === 'string') model = payloadJson.model
+    if (payloadJson.usage != null) usage = payloadJson.usage
+
+    const outputText = extractSseVisibleText(payloadJson.output_text)
+    if (outputText) {
+      outputTextFragments.push(outputText)
     }
+    appendReasoningFragment(outputReasoningFragments, payloadJson.reasoning)
+    appendReasoningFragment(outputReasoningFragments, payloadJson.reasoning_content)
+    appendReasoningFragment(outputReasoningFragments, payloadJson.output)
 
-    const choices = Array.isArray(parsed.choices) ? parsed.choices : []
+    const choices = Array.isArray(payloadJson.choices) ? payloadJson.choices : []
     for (let choiceIndex = 0; choiceIndex < choices.length; choiceIndex++) {
       const choice = choices[choiceIndex]
       const delta = choice?.delta
-      if (typeof delta?.content === 'string' && delta.content) {
-        fragments.push(delta.content)
-      }
-      if (Array.isArray(delta?.content)) {
-        for (const part of delta.content) {
-          if (typeof part?.text === 'string' && part.text) {
-            fragments.push(part.text)
-          }
-        }
-      }
+      appendSseChoiceText(choiceTexts, choiceIndex, delta?.content)
+      appendSseChoiceReasoning(choiceReasonings, choiceIndex, delta?.reasoning)
+      appendSseChoiceReasoning(choiceReasonings, choiceIndex, delta?.reasoning_content)
+      appendSseChoiceReasoning(choiceReasonings, choiceIndex, extractReasoningTextFromContent(delta?.content))
       if (Array.isArray(delta?.tool_calls)) {
         const toolCallMap = choiceToolCalls.get(choiceIndex) ?? {}
         delta.tool_calls.forEach((toolCall: any, toolIndex: number) => {
@@ -334,16 +410,10 @@ function aggregateSsePayload(rawText: string): { text: string; json?: unknown } 
       }
 
       const message = choice?.message
-      if (typeof message?.content === 'string' && message.content) {
-        fragments.push(message.content)
-      }
-      if (Array.isArray(message?.content)) {
-        for (const part of message.content) {
-          if (typeof part?.text === 'string' && part.text) {
-            fragments.push(part.text)
-          }
-        }
-      }
+      appendSseChoiceText(choiceTexts, choiceIndex, message?.content)
+      appendSseChoiceReasoning(choiceReasonings, choiceIndex, message?.reasoning)
+      appendSseChoiceReasoning(choiceReasonings, choiceIndex, message?.reasoning_content)
+      appendSseChoiceReasoning(choiceReasonings, choiceIndex, extractReasoningTextFromContent(message?.content))
       if (Array.isArray(message?.tool_calls)) {
         const toolCallMap = choiceToolCalls.get(choiceIndex) ?? {}
         message.tool_calls.forEach((toolCall: any, toolIndex: number) => {
@@ -355,48 +425,91 @@ function aggregateSsePayload(rawText: string): { text: string; json?: unknown } 
     }
   }
 
-  const choices = Array.from(choiceToolCalls.entries()).map(([index, toolCallMap]) => ({
-    index,
-    message: {
-      role: 'assistant',
-      content: '',
-      tool_calls: Object.keys(toolCallMap)
-        .map((key) => Number(key))
-        .sort((a, b) => a - b)
-        .map((key) => toolCallMap[key]),
-    },
-  }))
+  const orderedChoiceIndexes = Array.from(new Set([
+    ...choiceTexts.keys(),
+    ...choiceReasonings.keys(),
+    ...choiceToolCalls.keys(),
+  ])).sort((a, b) => a - b)
+
+  const choices = orderedChoiceIndexes.map((index) => {
+    const toolCallMap = choiceToolCalls.get(index) ?? {}
+    const reasoningText = (choiceReasonings.get(index) ?? []).join('')
+    return {
+      index,
+      message: {
+        role: 'assistant',
+        content: (choiceTexts.get(index) ?? []).join(''),
+        ...(reasoningText ? { reasoning_content: reasoningText } : {}),
+        tool_calls: Object.keys(toolCallMap)
+          .map((key) => Number(key))
+          .sort((a, b) => a - b)
+          .map((key) => toolCallMap[key]),
+      },
+    }
+  })
+
+  const aggregatedChoiceText = choices
+    .map((choice) => choice.message.content)
+    .filter(Boolean)
+    .join('\n\n')
+  const aggregatedChoiceReasoningText = orderedChoiceIndexes
+    .map((index) => (choiceReasonings.get(index) ?? []).join(''))
+    .filter(Boolean)
+    .join('\n\n')
+  const aggregatedOutputText = outputTextFragments.join('')
+  const aggregatedOutputReasoningText = outputReasoningFragments.join('')
+  const text = aggregatedChoiceText || aggregatedOutputText
+  const reasoningText = aggregatedChoiceReasoningText || aggregatedOutputReasoningText
+  const json = responseId || model || usage || choices.length || aggregatedOutputText
+    ? {
+        id: responseId,
+        model,
+        usage,
+        ...(choices.length
+          ? { choices }
+          : aggregatedOutputText
+            ? {
+                output: [{
+                  type: 'message',
+                  role: 'assistant',
+                  content: aggregatedOutputText,
+                  ...(reasoningText ? { reasoning_content: reasoningText } : {}),
+                }],
+              }
+            : {}),
+      }
+    : undefined
 
   return {
-    text: fragments.join(''),
-    json: responseId || model || usage || choices.length
-      ? {
-          id: responseId,
-          model,
-          usage,
-          choices,
-        }
-      : undefined,
+    text,
+    reasoningText,
+    json,
+    parsed,
   }
 }
 
-async function readResponseBody(response: Response, maxBytes: number): Promise<{ text: string; json?: unknown; bytes: number; truncated: boolean }> {
+async function readResponseBody(response: Response): Promise<{ text: string; reasoningText?: string; json?: unknown; bytes: number; truncated: boolean }> {
   const clone = response.clone()
   const contentType = clone.headers.get('content-type') || ''
   const rawText = await clone.text()
 
   if (contentType.includes('text/event-stream')) {
     const aggregated = aggregateSsePayload(rawText)
-    const clipped = clipText(aggregated.text || rawText, maxBytes)
-    return { text: clipped.text, json: aggregated.json, bytes: clipped.bytes, truncated: clipped.truncated }
+    const text = aggregated.parsed ? aggregated.text : rawText
+    return {
+      text,
+      reasoningText: aggregated.reasoningText || undefined,
+      json: aggregated.json,
+      bytes: Buffer.byteLength(text),
+      truncated: false,
+    }
   }
 
-  const clipped = clipText(rawText, maxBytes)
   if (contentType.includes('application/json')) {
-    const json = tryParseJson(clipped.text)
-    return { text: clipped.text, json, bytes: clipped.bytes, truncated: clipped.truncated }
+    const json = tryParseJson(rawText)
+    return { text: rawText, json, bytes: Buffer.byteLength(rawText), truncated: false }
   }
-  return { text: clipped.text, bytes: clipped.bytes, truncated: clipped.truncated }
+  return { text: rawText, bytes: Buffer.byteLength(rawText), truncated: false }
 }
 
 function parseBodyValue(body: BodyInit | null | undefined): { text?: string; json?: unknown } {
@@ -503,7 +616,7 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
       const responseHeaders = redactHeaders(Object.fromEntries(response.headers.entries()), config.redactHeaders)
 
       if (config.writeMarkdown) {
-        void readResponseBody(response, config.maxBodyBytes)
+        void readResponseBody(response)
           .then((responseBody) => {
             const structuredResponse = extractStructuredResponse(responseBody.json)
             const requestId = pickHeader(responseHeaders, ['x-request-id', 'request-id'])
@@ -540,6 +653,7 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
               toolCalls: [...structuredRequest.toolCalls, ...structuredResponse.toolCalls],
               toolResults: [...structuredRequest.toolResults, ...structuredResponse.toolResults],
               responseText: structuredResponse.messages.map((message) => message.content).filter(Boolean).join('\n\n') || responseBody.text,
+              responseReasoningText: structuredResponse.reasoningText || responseBody.reasoningText,
               requestBodyText: requestBody.text,
               requestBodyJson: requestBody.json,
               responseJson: responseBody.json,

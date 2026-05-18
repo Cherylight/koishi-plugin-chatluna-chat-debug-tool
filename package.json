@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chatluna-chat-debug-tool",
   "description": "ChatLuna chat debugging logs with Markdown export and image previews.",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "type": "module",
   "main": "lib/index.cjs",
   "module": "lib/index.mjs",
@@ -51,6 +51,7 @@
   "scripts": {
     "build": "corepack yarn exec tsc --noEmit false && node build.mjs",
     "build:types": "corepack yarn exec tsc --noEmit false",
+    "debug:html": "node scripts/render-debug-html.mjs",
     "prepublishOnly": "corepack yarn build"
   },
   "koishi": {

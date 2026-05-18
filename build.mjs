@@ -3,7 +3,6 @@
 import { build } from 'esbuild'
 
 const common = {
-  entryPoints: ['src/index.ts'],
   bundle: true,
   platform: 'node',
   target: 'es2022',
@@ -17,14 +16,22 @@ const common = {
 await Promise.all([
   build({
     ...common,
+    entryPoints: ['src/index.ts'],
     format: 'cjs',
     outfile: 'lib/index.cjs',
   }),
   build({
     ...common,
+    entryPoints: ['src/index.ts'],
     format: 'esm',
     outfile: 'lib/index.mjs',
   }),
+  build({
+    ...common,
+    entryPoints: ['src/render-preview-template.ts'],
+    format: 'esm',
+    outfile: 'lib/render-preview-template.mjs',
+  }),
 ])
 
-console.log('Build complete: lib/index.cjs + lib/index.mjs')
+console.log('Build complete: lib/index.cjs + lib/index.mjs + lib/render-preview-template.mjs')

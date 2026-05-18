@@ -1,9 +1,34 @@
 import path from 'node:path'
 import { h, type Context, type Session } from 'koishi'
 import type { DebugCaptureConfig, DebugEntry } from './types'
-import { DEBUG_LOG_TABLE, readDebugEntry, readMarkdownFile, removeDebugFiles, type DebugLogRow } from './storage'
+import { DEBUG_LOG_TABLE, pruneEmptyDebugDayDirs, readDebugEntry, readMarkdownFile, removeDebugFiles, type DebugLogRow } from './storage'
 import { renderDebugPreview } from './render-image'
 import { logger } from './logger'
+import zhCN from './locales/zh-CN'
+
+export interface DebugRuntimeController {
+  isHookInstalled(): boolean
+  ensureHookInstalled(reason: string): boolean
+  ensureHookUninstalled(reason: string): void
+}
+
+function formatLocale(template: string, params: Record<string, unknown> = {}) {
+  return template.replace(/\{(\w+)\}/g, (_, key) => String(params[key] ?? `{${key}}`))
+}
+
+function text(session: Session | undefined, key: string, params: Record<string, unknown> = {}) {
+  if (session) {
+    try {
+      const localized = session.text(key, params)
+      if (localized && localized !== key) return localized
+    } catch {
+      // fall back to bundled zh-CN strings when no session locale resolver is available
+    }
+  }
+
+  const fallback = (zhCN as Record<string, string>)[key] || key
+  return formatLocale(fallback, params)
+}
 
 function clipPreview(markdown: string, maxChars: number) {
   if (markdown.length <= maxChars) return markdown
@@ -12,9 +37,11 @@ function clipPreview(markdown: string, maxChars: number) {
 
 async function sendPreview(session: Session, markdown: string, mode: DebugCaptureConfig['sendMode']) {
   if (mode === 'text') {
-    return session.send(markdown)
+    await session.send(markdown)
+    return
   }
-  return session.send(markdown)
+  await session.send(markdown)
+  return
 }
 
 function formatMetadataLine(label: string, value: unknown) {
@@ -50,6 +77,40 @@ function extractDayAndFileName(filePath?: string) {
     day: '-',
     fileName: path.basename(filePath),
   }
+}
+
+function sortDebugRows(rows: DebugLogRow[], order: 'asc' | 'desc') {
+  const factor = order === 'asc' ? 1 : -1
+  return [...rows].sort((left, right) => {
+    const createdAtDiff = ((left.createdAt ?? 0) - (right.createdAt ?? 0)) * factor
+    if (createdAtDiff !== 0) return createdAtDiff
+    return left.id.localeCompare(right.id) * factor
+  })
+}
+
+function formatRelativeAge(createdAt?: number, now = Date.now()) {
+  if (!createdAt) return '刚刚'
+  const elapsedSeconds = Math.max(0, Math.floor((now - createdAt) / 1000))
+  if (elapsedSeconds < 60) {
+    return `${elapsedSeconds}秒前`
+  }
+
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60)
+  if (elapsedMinutes < 60) {
+    return `${elapsedMinutes}分钟前`
+  }
+
+  const elapsedHours = Math.floor(elapsedMinutes / 60)
+  if (elapsedHours < 24) {
+    return `${elapsedHours}小时前`
+  }
+
+  const elapsedDays = Math.floor(elapsedHours / 24)
+  if (elapsedDays < 7) {
+    return `${elapsedDays}天前`
+  }
+
+  return '更久以前'
 }
 
 async function findRow(ctx: Context, id: string) {
@@ -149,6 +210,12 @@ async function loadEntry(row: any) {
   return buildFallbackEntry(typedRow, markdown)
 }
 
+function dispatchOnce(session: Session, content: string | ReturnType<typeof h>) {
+  void session.send(content).catch((error) => {
+    logger.warn('调试预览发送结果已忽略（已按单次发送处理）:', error)
+  })
+}
+
 async function sendImageBuffers(session: Session, buffers: Buffer[], mode: DebugCaptureConfig['sendMode'], batchSize: number) {
   if (!buffers.length) return
   if (mode === 'text') {
@@ -165,61 +232,83 @@ async function sendImageBuffers(session: Session, buffers: Buffer[], mode: Debug
   for (let index = 0; index < buffers.length; index += batchSize) {
     const batch = buffers.slice(index, index + batchSize)
     const figure = h('figure', {}, batch.map((buffer) => h('message', {}, [h.image(buffer, 'image/png')])))
-    await session.send(figure)
+    dispatchOnce(session, figure)
   }
 }
 
-export function registerCommands(ctx: Context, config: DebugCaptureConfig) {
-  const command = ctx.command('chat-debug', 'ChatLuna 调试日志管理')
+export function registerCommands(ctx: Context, config: DebugCaptureConfig, runtime: DebugRuntimeController) {
+  const command = ctx.command('chat-debug', text(undefined, 'commands.chat-debug.description'))
 
-  command.subcommand('.status', '查看聊天调试状态')
-    .action(async () => {
-      return `ChatLuna 聊天调试：${config.enabled && config.captureEnabled ? 'on' : 'off'}`
+  command.subcommand('.status', text(undefined, 'commands.chat-debug.status.description'))
+    .action(async ({ session }) => {
+      if (!config.enabled || !config.captureEnabled) {
+        return text(session, 'commands.chat-debug.messages.status.off')
+      }
+
+      return text(
+        session,
+        runtime.isHookInstalled()
+          ? 'commands.chat-debug.messages.status.on'
+          : 'commands.chat-debug.messages.status.partial',
+      )
     })
 
-  command.subcommand('.on', '开启聊天调试')
-    .action(async () => {
+  command.subcommand('.on', text(undefined, 'commands.chat-debug.on.description'))
+    .action(async ({ session }) => {
       config.enabled = true
       config.captureEnabled = true
-      return 'ChatLuna 聊天调试已开启'
+      const installed = runtime.ensureHookInstalled('command.on')
+      return text(
+        session,
+        installed
+          ? 'commands.chat-debug.messages.on.success'
+          : 'commands.chat-debug.messages.on.pending',
+      )
     })
 
-  command.subcommand('.off', '关闭聊天调试')
-    .action(async () => {
+  command.subcommand('.off', text(undefined, 'commands.chat-debug.off.description'))
+    .action(async ({ session }) => {
       config.captureEnabled = false
-      return 'ChatLuna 聊天调试已关闭'
+      runtime.ensureHookUninstalled('command.off')
+      return text(session, 'commands.chat-debug.messages.off.success')
     })
 
-  command.subcommand('.list [page:number]', '列出调试日志')
+  command.subcommand('.list [page:number]', text(undefined, 'commands.chat-debug.list.description'))
     .action(async ({ session }, page = 1) => {
       const limit = config.managerPageSize
-      const offset = Math.max(0, page - 1) * limit
+      const safePage = Math.max(1, Math.floor(page))
+      const offset = (safePage - 1) * limit
       const rows = await (ctx.database as any).get(DEBUG_LOG_TABLE, {}, {
         limit,
         offset,
         sort: { createdAt: 'desc' },
-      } as any)
-      if (!rows.length) return '没有可用的调试日志。'
-      const lines = rows.map((row: any) => {
+      } as any) as DebugLogRow[]
+      const pagedRows = sortDebugRows(rows, 'asc')
+      if (!pagedRows.length) {
+        return safePage === 1
+          ? text(session, 'commands.chat-debug.messages.list.empty')
+          : text(session, 'commands.chat-debug.messages.list.empty-page', { page: safePage })
+      }
+      const lines = pagedRows.map((row) => {
         const { day, fileName } = extractDayAndFileName(row.filePath)
-        return `- ${row.id} | ${row.source || '-'} | ${row.resolvedModel || row.model || '-'} | ${row.status || '-'} | ${day} | ${fileName}`
+        return `- ${row.id} | ${formatRelativeAge(row.createdAt)} | ${row.source || '-'} | ${row.resolvedModel || row.model || '-'} | ${row.status || '-'} | ${day} | ${fileName}`
       })
       return lines.join('\n')
     })
 
-  command.subcommand('.show <id:text>', '查看指定日志摘要')
-    .action(async (_argv, id) => {
+  command.subcommand('.show <id:text>', text(undefined, 'commands.chat-debug.show.description'))
+    .action(async ({ session }, id) => {
       const row = await findRow(ctx, id)
-      if (!row) return '未找到指定日志。'
+      if (!row) return text(session, 'commands.chat-debug.messages.not-found')
       const entry = await loadEntry(row)
       return formatEntryOverview(entry, row)
     })
 
-  command.subcommand('.preview <id:text>', '预览指定日志')
+  command.subcommand('.preview <id:text>', text(undefined, 'commands.chat-debug.preview.description'))
     .action(async ({ session }, id) => {
       if (!session) return
       const row = await findRow(ctx, id)
-      if (!row) return '未找到指定日志。'
+      if (!row) return text(session, 'commands.chat-debug.messages.not-found')
       const filePath = row.filePath as string
       const markdown = await readMarkdownFile(filePath)
       const previewText = clipPreview(markdown, config.maxPreviewChars)
@@ -227,13 +316,15 @@ export function registerCommands(ctx: Context, config: DebugCaptureConfig) {
       return sendPreview(session, previewText, config.sendMode)
     })
 
-  command.subcommand('.send <id:text>', '发送日志预览')
+  command.subcommand('.send <id:text>', text(undefined, 'commands.chat-debug.send.description'))
     .action(async ({ session }, id) => {
       if (!session) return
       const row = await findRow(ctx, id)
-      if (!row) return '未找到指定日志。'
+      if (!row) return text(session, 'commands.chat-debug.messages.not-found')
       const entry = await loadEntry(row)
-      const preview = await renderDebugPreview(ctx, entry, config)
+      const preview = await renderDebugPreview(ctx, entry, config, {
+        sourcePath: row.filePath as string | undefined,
+      })
       if (preview.tooLarge || !preview.buffers?.length) {
         return clipPreview(preview.markdown, config.maxPreviewChars)
       }
@@ -241,31 +332,35 @@ export function registerCommands(ctx: Context, config: DebugCaptureConfig) {
       return
     })
 
-  command.subcommand('.delete <id:text>', '删除指定日志')
-    .action(async (_argv, id) => {
+  command.subcommand('.delete <id:text>', text(undefined, 'commands.chat-debug.delete.description'))
+    .action(async ({ session }, id) => {
       const row = await findRow(ctx, id)
-      if (!row) return '未找到指定日志。'
+      if (!row) return text(session, 'commands.chat-debug.messages.not-found')
       await removeDebugFiles(await collectDeletePaths(row))
       await (ctx.database as any).remove(DEBUG_LOG_TABLE, { id: row.id } as any)
-      return `已删除调试日志：${row.id}`
+      return text(session, 'commands.chat-debug.messages.delete.success', { id: row.id })
     })
 
-  command.subcommand('.clean [keep:number]', '清理旧日志，保留最新若干条')
-    .action(async (_argv, keep = config.managerPageSize) => {
+  command.subcommand('.clean [keep:number]', text(undefined, 'commands.chat-debug.clean.description'))
+    .action(async ({ session }, keep = config.managerPageSize) => {
+      await pruneEmptyDebugDayDirs(ctx, config.storageDir)
+
       const safeKeep = Math.max(0, Math.floor(keep))
-      const rows = await (ctx.database as any).get(DEBUG_LOG_TABLE, {}, {
-        sort: { createdAt: 'desc' },
-      } as any)
+      const rows = sortDebugRows(await (ctx.database as any).get(DEBUG_LOG_TABLE, {}) as DebugLogRow[], 'desc')
       const obsoleteRows = rows.slice(safeKeep) as DebugLogRow[]
       if (!obsoleteRows.length) {
-        return `没有需要清理的日志，当前保留数：${rows.length}`
+        return text(session, 'commands.chat-debug.messages.clean.empty', { count: rows.length })
       }
 
       for (const row of obsoleteRows) {
         await removeDebugFiles(await collectDeletePaths(row))
         await (ctx.database as any).remove(DEBUG_LOG_TABLE, { id: row.id } as any)
       }
-      return `已清理 ${obsoleteRows.length} 条旧日志，保留最新 ${safeKeep} 条。`
+      await pruneEmptyDebugDayDirs(ctx, config.storageDir)
+      return text(session, 'commands.chat-debug.messages.clean.success', {
+        count: obsoleteRows.length,
+        keep: safeKeep,
+      })
     })
 
   logger.info('chat-debug 命令已注册')

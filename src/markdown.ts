@@ -38,16 +38,34 @@ function formatSourceHeading(source: string): string {
 }
 
 function renderMessageBlock(message: DebugMessagePart): string {
+  if (message.role === 'tool') {
+    const toolMetaLines = [
+      message.name ? `- 📃Name: ${message.name}` : '',
+      message.toolCallId ? `- 🛠Tool Call ID: ${message.toolCallId}` : '',
+    ].filter(Boolean)
+
+    return [
+      `### ${messageAnchorLabel(message)}`,
+      toolMetaLines.length ? renderFencedBlock(toolMetaLines.join('\n'), 'md', '~') : '',
+      renderFencedBlock(message.content || '_empty_', 'md', '~'),
+    ].filter(Boolean).join('\n')
+  }
+
   return [
     `### ${messageAnchorLabel(message)}`,
     message.name ? `- Name: ${message.name}` : '',
     message.toolCallId ? `- Tool Call ID: ${message.toolCallId}` : '',
-    renderFencedBlock(message.content || '_empty_', 'text', '~'),
+    renderFencedBlock(message.content || '_empty_', 'md', '~'),
   ].filter(Boolean).join('\n')
 }
 
 function renderJsonBlock(value: unknown): string {
-  return renderFencedBlock(JSON.stringify(value, null, 2), 'json', '`')
+  const normalized = normalizeContent(JSON.stringify(value, null, 2) || 'null')
+  return [
+    '```json',
+    normalized,
+    '```',
+  ].join('\n')
 }
 
 export function renderDebugMarkdown(entry: DebugEntry): string {
@@ -96,6 +114,9 @@ export function renderDebugMarkdown(entry: DebugEntry): string {
   const requestHeaders = Object.keys(entry.requestHeaders).length ? renderJsonBlock(entry.requestHeaders) : '_No request headers captured._'
   const responseHeaders = Object.keys(entry.responseHeaders).length ? renderJsonBlock(entry.responseHeaders) : '_No response headers captured._'
   const responseJson = entry.responseJson != null ? renderJsonBlock(entry.responseJson) : '_No structured response JSON captured._'
+  const responseReasoning = entry.responseReasoningText
+    ? renderFencedBlock(entry.responseReasoningText, 'md', '~')
+    : '_No reasoning captured._'
 
   return [
     `# ${formatSourceHeading(metadata.source)} / ${metadata.id}`,
@@ -135,7 +156,10 @@ export function renderDebugMarkdown(entry: DebugEntry): string {
     '### Response JSON',
     responseJson,
     '',
+    '### Response Reasoning',
+    responseReasoning,
+    '',
     '### Response Text',
-    renderFencedBlock(entry.responseText || '_empty_', 'text', '~'),
+    renderFencedBlock(entry.responseText || '_empty_', 'md', '~'),
   ].filter((line) => line !== '').join('\n') + '\n'
 }

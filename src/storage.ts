@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+﻿import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { Context } from 'koishi'
@@ -91,6 +91,50 @@ export async function removeDebugFiles(paths: Array<string | undefined>) {
   }))
 }
 
+async function directoryContainsFiles(directoryPath: string): Promise<boolean> {
+  const entries = await fs.readdir(directoryPath, { withFileTypes: true }).catch(() => null)
+  try {
+    if (!entries) return false
+  } catch {
+    return false
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(directoryPath, entry.name)
+    if (entry.isFile()) {
+      return true
+    }
+    if (entry.isDirectory() && await directoryContainsFiles(fullPath)) {
+      return true
+    }
+  }
+
+  return false
+}
+
+export async function pruneEmptyDebugDayDirs(ctx: Context, storageDir: string) {
+  const baseDir = path.join(ctx.baseDir, 'data', storageDir)
+  const entries = await fs.readdir(baseDir, { withFileTypes: true }).catch(() => null)
+  if (!entries) {
+    return 0
+  }
+
+  let removedCount = 0
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const dayDir = path.join(baseDir, entry.name)
+    if (await directoryContainsFiles(dayDir)) continue
+    try {
+      await fs.rm(dayDir, { recursive: true, force: true })
+      removedCount += 1
+    } catch (error) {
+      logger.warn(`移除空调试目录失败: ${dayDir}`, error)
+    }
+  }
+
+  return removedCount
+}
+
 function serializeUnknown(value: unknown): string | undefined {
   if (value == null) return undefined
   if (typeof value === 'string') return value
@@ -122,7 +166,7 @@ async function writeAssetFile(
   mimeType: string,
   data: string,
 ): Promise<DebugAssetFile> {
-  const hash = createHash('sha1').update(data).digest('hex').slice(0, 8)
+  const hash = createHash('sha1').update(data).digest('hex').slice(0, 16)
   const extension = mimeToExtension(mimeType)
   const fileName = `${buildDebugFileStem(entry.metadata.id)}-asset-${String(assetIndex).padStart(2, '0')}.${extension}`
   const filePath = ensureFilesPath(ctx, storageDir, entry.metadata.createdAt, fileName)
@@ -260,6 +304,9 @@ export async function rewriteDebugEntryAssets(ctx: Context, storageDir: string, 
       ? await rewriteStringAssets(ctx, storageDir, entry, entry.requestBodyText, assetMap, assetCounter, true)
       : entry.requestBodyText,
     requestBodyJson: await rewriteUnknownAssets(ctx, storageDir, entry, entry.requestBodyJson, assetMap, assetCounter, false),
+    responseReasoningText: entry.responseReasoningText
+      ? await rewriteStringAssets(ctx, storageDir, entry, entry.responseReasoningText, assetMap, assetCounter, true)
+      : entry.responseReasoningText,
     responseText: await rewriteStringAssets(ctx, storageDir, entry, entry.responseText, assetMap, assetCounter, true),
     responseJson: await rewriteUnknownAssets(ctx, storageDir, entry, entry.responseJson, assetMap, assetCounter, false),
     assetFiles: Array.from(assetMap.values()),
@@ -290,3 +337,5 @@ export async function saveDebugEntry(ctx: Context, entry: DebugEntry, markdown: 
   }
   return row
 }
+
+
