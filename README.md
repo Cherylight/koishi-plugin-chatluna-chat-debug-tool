@@ -77,6 +77,3 @@ corepack yarn debug:html d:\code_base\koishi-app\data\chat-debug\2026-05-18\md\c
 仓库包含 GitHub Actions 的 npm 发布工作流：
 
 - 推送 `main` 分支且 `package.json` 版本变化时自动检查并发布
-- 支持手动触发 `workflow_dispatch`
-- 依赖仓库机密 `NPM_TOKEN`
-
