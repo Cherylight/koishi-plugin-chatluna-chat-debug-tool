@@ -47,10 +47,10 @@
     "typescript": "^6.0.2"
   },
   "scripts": {
-    "build": "corepack yarn exec tsc --noEmit false && node build.mjs",
-    "build:types": "corepack yarn exec tsc --noEmit false",
+    "build": "tsc --noEmit false && node build.mjs",
+    "build:types": "tsc --noEmit false",
     "debug:html": "node scripts/render-debug-html.mjs",
-    "prepublishOnly": "corepack yarn build"
+    "prepublishOnly": "npm run build"
   },
   "koishi": {
     "description": {
