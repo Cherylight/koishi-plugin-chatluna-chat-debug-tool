@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -26,20 +27,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         run: npm install
-
-      - name: Verify npm token is present
-        run: |
-          if [ -z "${NODE_AUTH_TOKEN}" ]; then
-            echo "Missing NODE_AUTH_TOKEN (set Actions secret NPM_TOKEN in repo Settings)."
-            exit 1
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Build
         run: npm run build
@@ -58,6 +50,4 @@ jobs:
 
       - name: Publish to npm
         if: steps.check.outputs.already_published == 'false' && github.event.inputs.dry_run != 'true'
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
