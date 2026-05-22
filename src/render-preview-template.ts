@@ -491,10 +491,10 @@ function renderSystemPromptSection(
     '</div>',
     `<pre class="system-prompt-preview"><code>${escapeHtml(preview)}</code></pre>`,
     '<div class="system-prompt-hidden-note">...已隐藏</div>',
-    '</summary>',
     '<div class="system-prompt-body">',
     bodyHtml,
     '</div>',
+    '</summary>',
     '</details>',
     '</section>',
   ].join('')

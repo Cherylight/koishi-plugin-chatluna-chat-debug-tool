@@ -1,7 +1,7 @@
 export const debugPreviewStyles = `
 :root {
   color-scheme: light;
-  --bg: #eef4fb;
+  --bg: #edfaff;
   --panel: #ffffff;
   --ink: #0f172a;
   --muted: #475569;
@@ -23,23 +23,6 @@ export const debugPreviewStyles = `
   --xml-value: rgb(10, 48, 105);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --panel: #111827;
-    --ink: #e5e7eb;
-    --line: #243244;
-    --accent-soft: #162033;
-    --json-key: rgb(126, 231, 135);
-    --json-value: rgb(165, 214, 255);
-    --json-punctuation: rgb(212, 212, 212);
-    --json-boolean: rgb(165, 214, 255);
-    --json-null: rgb(156, 163, 175);
-    --xml-tag: rgb(125, 211, 252);
-    --xml-attr: rgb(126, 231, 135);
-    --xml-value: rgb(165, 214, 255);
-  }
-}
-
 html {
   scroll-behavior: smooth;
 }
@@ -47,7 +30,7 @@ html {
 body {
   margin: 0;
   padding: 24px;
-  background: radial-gradient(circle at 10% -20%, #ecfeff 0%, #eff6ff 42%, #f8fafc 100%);
+  background: var(--bg);
   font-family: "Noto Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif;
   color: var(--ink);
 }
@@ -58,7 +41,7 @@ body {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 16px;
-  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 16px 36px #0f172a14;
   overflow: hidden;
 }
 
@@ -283,7 +266,7 @@ p, li {
 .system-prompt-summary {
   cursor: pointer;
   padding: 12px 14px;
-  background: rgba(251, 191, 36, 0.08);
+  background: #fbbf2414;
 }
 
 .system-prompt-summary-head {
@@ -319,7 +302,7 @@ p, li {
   padding: 10px 12px;
   border: 1px dashed #fcd34d;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.7);
+  background: #ffffffb3;
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -343,7 +326,12 @@ p, li {
 }
 
 .system-prompt-body {
-  padding: 0 14px 14px;
+  display: none;
+  padding: 0;
+}
+
+.system-prompt-details[open] .system-prompt-body {
+  display: block;
 }
 
 .message-card.role-assistant .xml-block {
@@ -401,7 +389,7 @@ p, li {
   border: 1px solid #cbd5e1;
   border-radius: 12px;
   background: #ffffff;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4);
+  box-shadow: inset 0 0 0 1px #ffffff66;
 }
 
 .chat-image {
@@ -547,5 +535,66 @@ code {
 
 .xml-attr-value {
   color: var(--xml-value);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #002a50;
+    --panel: #111827;
+    --ink: #e5e7eb;
+    --line: #243244;
+    --accent-soft: #162033;
+    --json-key: #7ee787;
+    --json-value: #a5d6ff;
+    --json-punctuation: #d4d4d4;
+    --json-boolean: #a5d6ff;
+    --json-null: #9ca3af;
+    --xml-tag: #7dd3fc;
+    --xml-attr: #7ee787;
+    --xml-value: #719bff;
+  }
+
+  body {
+    background: var(--bg);
+  }
+
+  .outline-link {
+    color: #8ca6fb;
+  }
+
+  .metadata-panel {
+    background: linear-gradient(180deg, #0a0e1e 0%, #121314 100%);
+  }
+
+  .system-prompt-summary {
+    background: #fbbf24ad;
+  }
+
+  .system-prompt-hidden-note {
+    color: #3c424a;
+  }
+
+  .xml-value {
+    color: #719bff;
+  }
+
+  .role-block,
+  .json-block,
+  .xml-block {
+    background: #121314;
+  }
+
+  pre,
+  code {
+    color: #75a1e8;
+  }
+
+  .message-card.role-user .role-block {
+    background: #1f232d;
+  }
+
+  .message-card.role-assistant .role-block {
+    background: #1f1939;
+  }
 }
 `
