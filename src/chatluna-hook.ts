@@ -512,6 +512,15 @@ async function readResponseBody(response: Response): Promise<{ text: string; rea
   return { text: rawText, bytes: Buffer.byteLength(rawText), truncated: false }
 }
 
+function isAbortError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+
+  const value = error as { name?: unknown; code?: unknown; message?: unknown }
+  if (value.name === 'AbortError' || value.code === 'ABORT_ERR') return true
+
+  return typeof value.message === 'string' && /aborted|abort/i.test(value.message)
+}
+
 function parseBodyValue(body: BodyInit | null | undefined): { text?: string; json?: unknown } {
   if (typeof body === 'string') {
     try {
@@ -668,6 +677,10 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
               })
           })
           .catch((error) => {
+            if (isAbortError(error)) {
+              logger.debug('调试日志响应体读取被上游取消，跳过本次保存')
+              return
+            }
             logger.warn('保存调试日志失败:', error)
           })
       }
