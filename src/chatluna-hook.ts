@@ -306,21 +306,38 @@ function tryParseJson(text: string): unknown {
   }
 }
 
-function mergeToolCallFragment(target: Record<number, any>, index: number, fragment: any) {
+function mergeToolCallName(currentName: string | undefined, fragmentName: unknown, knownToolNames?: Set<string>): string {
+  if (typeof fragmentName !== 'string' || !fragmentName) {
+    return currentName || ''
+  }
+
+  const current = currentName || ''
+  if (!current) return fragmentName
+
+  const appended = `${current}${fragmentName}`
+  if (!knownToolNames?.size) return appended
+
+  if (knownToolNames.has(appended)) return appended
+  if (knownToolNames.has(fragmentName)) return fragmentName
+  if (knownToolNames.has(current)) return current
+
+  return appended
+}
+
+function mergeToolCallFragment(target: Record<number, any>, index: number, fragment: any, knownToolNames?: Set<string>) {
   const current = target[index] ?? {
     id: fragment?.id,
     type: fragment?.type,
     function: {
-      name: fragment?.function?.name ?? '',
-      arguments: fragment?.function?.arguments ?? '',
+      name: '',
+      arguments: '',
     },
   }
 
   if (fragment?.id) current.id = fragment.id
   if (fragment?.type) current.type = fragment.type
-  if (fragment?.function?.name) {
-    current.function.name = `${current.function.name || ''}${fragment.function.name}`
-  }
+  current.function ??= { name: '', arguments: '' }
+  current.function.name = mergeToolCallName(current.function.name, fragment?.function?.name, knownToolNames)
   if (fragment?.function?.arguments) {
     current.function.arguments = `${current.function.arguments || ''}${fragment.function.arguments}`
   }
@@ -358,7 +375,7 @@ function appendSseChoiceReasoning(target: Map<number, string[]>, index: number, 
   target.set(index, fragments)
 }
 
-function aggregateSsePayload(rawText: string): { text: string; reasoningText: string; json?: unknown; parsed: boolean } {
+function aggregateSsePayload(rawText: string, knownToolNames?: Set<string>): { text: string; reasoningText: string; json?: unknown; parsed: boolean } {
   const outputTextFragments: string[] = []
   const outputReasoningFragments: string[] = []
   const choiceTexts = new Map<number, string[]>()
@@ -404,7 +421,7 @@ function aggregateSsePayload(rawText: string): { text: string; reasoningText: st
         const toolCallMap = choiceToolCalls.get(choiceIndex) ?? {}
         delta.tool_calls.forEach((toolCall: any, toolIndex: number) => {
           const index = typeof toolCall?.index === 'number' ? toolCall.index : toolIndex
-          mergeToolCallFragment(toolCallMap, index, toolCall)
+          mergeToolCallFragment(toolCallMap, index, toolCall, knownToolNames)
         })
         choiceToolCalls.set(choiceIndex, toolCallMap)
       }
@@ -488,13 +505,13 @@ function aggregateSsePayload(rawText: string): { text: string; reasoningText: st
   }
 }
 
-async function readResponseBody(response: Response): Promise<{ text: string; reasoningText?: string; json?: unknown; bytes: number; truncated: boolean }> {
+async function readResponseBody(response: Response, knownToolNames?: Set<string>): Promise<{ text: string; reasoningText?: string; json?: unknown; bytes: number; truncated: boolean }> {
   const clone = response.clone()
   const contentType = clone.headers.get('content-type') || ''
   const rawText = await clone.text()
 
   if (contentType.includes('text/event-stream')) {
-    const aggregated = aggregateSsePayload(rawText)
+    const aggregated = aggregateSsePayload(rawText, knownToolNames)
     const text = aggregated.parsed ? aggregated.text : rawText
     return {
       text,
@@ -625,7 +642,7 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
       const responseHeaders = redactHeaders(Object.fromEntries(response.headers.entries()), config.redactHeaders)
 
       if (config.writeMarkdown) {
-        void readResponseBody(response)
+        void readResponseBody(response, new Set(tools.map((tool) => tool.name).filter(Boolean)))
           .then((responseBody) => {
             const structuredResponse = extractStructuredResponse(responseBody.json)
             const requestId = pickHeader(responseHeaders, ['x-request-id', 'request-id'])
