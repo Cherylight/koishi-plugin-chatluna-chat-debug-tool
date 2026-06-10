@@ -20,15 +20,19 @@ export const Config: Schema<DebugCaptureConfig> = Schema.object({
   writeMarkdown: Schema.boolean()
     .default(true)
     .description('是否将日志写入 Markdown 文件'),
-  renderImageOnCommand: Schema.boolean()
-    .default(true)
-    .description('是否在命令执行时将 Markdown 渲染为图片发送'),
+  sendMode: Schema.union([
+    Schema.const('text').description('文本预览'),
+    Schema.const('image').description('图片'),
+    Schema.const('html').description('HTML 文件'),
+  ] as const)
+    .default('image')
+    .description('命令发送方式'),
   collapseJsonOnRender: Schema.boolean()
     .default(true)
     .description('渲染图片时是否折叠 JSON 详情'),
   collapseSystemPromptOnRender: Schema.boolean()
     .default(false)
-    .description('渲染图片时是否折叠 System Prompt（保留三行预览）'),
+    .description('渲染时是否折叠 System Prompt（保留三行预览）'),
   embedChatImagesOnRender: Schema.boolean()
     .default(false)
     .description('渲染图片时是否在网页中嵌入聊天图片（否则为URL）'),
@@ -42,16 +46,9 @@ export const Config: Schema<DebugCaptureConfig> = Schema.object({
     .default(['authorization', 'cookie', 'x-api-key'])
     .description('需要脱敏的请求头'),
   captureFilters: CaptureFilters,
-  sendMode: Schema.union([
-    Schema.const('image').description('image'),
-    Schema.const('text').description('text'),
-    Schema.const('figure').description('figure'),
-  ] as const)
-    .default('figure')
-    .description('命令发送方式'),
   mergeForwardBatchSize: Schema.number().min(1).max(20).step(1)
     .default(5)
-    .description('合并转发每批条数'),
+    .description('图片模式下合并转发每批条数'),
   renderTimeoutMs: Schema.number().min(1000).max(120000).step(1000)
     .default(15000)
     .description('Markdown 渲染超时时间（毫秒）'),

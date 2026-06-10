@@ -12,7 +12,7 @@ export { Config } from './config'
 export { buildDebugPreviewHtml } from './render-preview-template'
 export const name = 'chatluna-chat-debug-tool'
 export const inject = {
-  optional: ['chatluna', 'database', 'puppeteer'],
+  optional: ['chatluna', 'database', 'puppeteer', 'assets'],
 }
 
 export const usage = `
@@ -50,6 +50,7 @@ export function apply(ctx: Context, config: DebugCaptureConfig) {
     error: 'text',
     filePath: 'text',
     jsonPath: 'text',
+    htmlPath: 'text',
     summary: 'text',
   }, {
     primary: 'id',

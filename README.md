@@ -7,7 +7,7 @@
 - 透明捕获 ChatLuna 聊天请求与响应
 - 输出 Markdown 调试日志，并为管理器保留结构化 JSON
 - 提供 `chat-debug` 命令用于列表、预览、发送和清理日志
-- 支持 Puppeteer 渲染图片预览，长内容可分页拆分
+- 支持文本预览、Puppeteer 图片预览，以及将 HTML 报告作为群聊文件发送
 
 ## 安装
 
@@ -52,7 +52,7 @@ corepack yarn debug:html d:\code_base\koishi-app\data\chat-debug\2026-05-18\md\c
 | `enabled` | `false` | 是否启用插件 |
 | `captureEnabled` | `false` | 是否开始捕获请求与响应 |
 | `writeMarkdown` | `true` | 是否写出 Markdown 调试日志 |
-| `renderImageOnCommand` | `true` | 命令预览时是否走图片渲染 |
+| `sendMode` | `image` | 命令发送方式，可选 `text` / `image` / `html` |
 | `collapseJsonOnRender` | `true` | HTML/图片预览时默认折叠 JSON |
 | `collapseSystemPromptOnRender` | `false` | HTML/图片预览时默认展开系统提示词 |
 | `embedChatImagesOnRender` | `false` | HTML/图片预览时是否把聊天图片替换为真实图片控件 |
@@ -60,8 +60,7 @@ corepack yarn debug:html d:\code_base\koishi-app\data\chat-debug\2026-05-18\md\c
 | `maxPreviewChars` | `2000` | 文本预览的最大字符数 |
 | `redactHeaders` | `['authorization', 'cookie', 'x-api-key']` | 发送前做脱敏的请求头 |
 | `captureFilters` | `['/chat/completions', '/responses', 'messages', 'tools']` | 命中过滤词后才记录请求 |
-| `sendMode` | `figure` | 图片发送模式，可选 `image` / `text` / `figure` |
-| `mergeForwardBatchSize` | `5` | `figure` 模式下单批合并条数 |
+| `mergeForwardBatchSize` | `5` | 图片模式下单批合并条数 |
 | `renderTimeoutMs` | `15000` | Puppeteer 渲染超时，单位毫秒 |
 | `imageMaxBytes` | `5242880` (`5 MiB`) | 单张预览图的最大字节数 |
 | `managerPageSize` | `20` | `chat-debug.list` 默认分页大小 |

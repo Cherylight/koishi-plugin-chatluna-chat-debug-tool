@@ -13,6 +13,7 @@ export interface DebugLogRow extends Omit<DebugMetadata, 'reasoning' | 'otherOpt
   usage?: string
   filePath: string
   jsonPath: string
+  htmlPath?: string
   summary: string
 }
 
@@ -30,7 +31,7 @@ function ensureDataPath(
   ctx: Context,
   storageDir: string,
   createdAt: number,
-  category: 'md' | 'json' | 'files',
+  category: 'md' | 'json' | 'files' | 'html',
   fileName: string,
 ): string {
   const base = path.join(ctx.baseDir, 'data', storageDir)
@@ -44,6 +45,10 @@ export function ensureMarkdownPath(ctx: Context, storageDir: string, id: string,
 
 export function ensureJsonPath(ctx: Context, storageDir: string, id: string, createdAt: number): string {
   return ensureDataPath(ctx, storageDir, createdAt, 'json', `${buildDebugFileStem(id)}.json`)
+}
+
+export function ensureHtmlPath(ctx: Context, storageDir: string, id: string, createdAt: number): string {
+  return ensureDataPath(ctx, storageDir, createdAt, 'html', `${buildDebugFileStem(id)}.html`)
 }
 
 function ensureFilesPath(ctx: Context, storageDir: string, createdAt: number, fileName: string): string {
@@ -79,6 +84,13 @@ export async function writeJsonFile(ctx: Context, storageDir: string, id: string
 export async function readDebugEntry(filePath: string) {
   const content = await fs.readFile(filePath, 'utf8')
   return JSON.parse(content) as DebugEntry
+}
+
+export async function writeHtmlFile(ctx: Context, storageDir: string, id: string, createdAt: number, html: string) {
+  const filePath = ensureHtmlPath(ctx, storageDir, id, createdAt)
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+  await fs.writeFile(filePath, html, 'utf8')
+  return filePath
 }
 
 export async function removeDebugFiles(paths: Array<string | undefined>) {

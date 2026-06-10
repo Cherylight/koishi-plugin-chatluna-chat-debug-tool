@@ -2,7 +2,7 @@ export interface DebugCaptureConfig {
   enabled: boolean
   captureEnabled: boolean
   writeMarkdown: boolean
-  renderImageOnCommand: boolean
+  renderImageOnCommand?: boolean
   collapseJsonOnRender: boolean
   collapseSystemPromptOnRender: boolean
   embedChatImagesOnRender: boolean
@@ -10,7 +10,7 @@ export interface DebugCaptureConfig {
   maxPreviewChars: number
   redactHeaders: string[]
   captureFilters: string[]
-  sendMode: 'image' | 'text' | 'figure'
+  sendMode: 'image' | 'text' | 'html'
   mergeForwardBatchSize: number
   renderTimeoutMs: number
   imageMaxBytes: number

@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { h, type Context, type Session } from 'koishi'
 import type { DebugCaptureConfig, DebugEntry } from './types'
-import { DEBUG_LOG_TABLE, pruneEmptyDebugDayDirs, readDebugEntry, readMarkdownFile, removeDebugFiles, type DebugLogRow } from './storage'
-import { renderDebugPreview } from './render-image'
+import { DEBUG_LOG_TABLE, pruneEmptyDebugDayDirs, readDebugEntry, readMarkdownFile, removeDebugFiles, writeHtmlFile, type DebugLogRow } from './storage'
+import { renderDebugPreview, renderDebugPreviewHtml } from './render-image'
 import { logger } from './logger'
 import zhCN from './locales/zh-CN'
 
@@ -35,13 +37,17 @@ function clipPreview(markdown: string, maxChars: number) {
   return `${markdown.slice(0, maxChars)}\n\n...\n\n[preview truncated]`
 }
 
-async function sendPreview(session: Session, markdown: string, mode: DebugCaptureConfig['sendMode']) {
-  if (mode === 'text') {
-    await session.send(markdown)
-    return
-  }
+type ActiveSendMode = 'text' | 'image' | 'html'
+
+function normalizeSendMode(config: DebugCaptureConfig): ActiveSendMode {
+  const sendMode = (config as any).sendMode
+  if (sendMode === 'html') return 'html'
+  if (sendMode === 'text') return 'text'
+  return 'image'
+}
+
+async function sendPreview(session: Session, markdown: string) {
   await session.send(markdown)
-  return
 }
 
 function formatMetadataLine(label: string, value: unknown) {
@@ -55,7 +61,7 @@ function formatMetadataLine(label: string, value: unknown) {
 function describeStoredFile(filePath?: string) {
   if (!filePath) return undefined
   const normalized = filePath.replace(/\\/g, '/')
-  const match = normalized.match(/([^/]+)\/(md|json|files)\/([^/]+)$/)
+  const match = normalized.match(/([^/]+)\/(md|json|files|html)\/([^/]+)$/)
   if (match) {
     return `${match[1]}/${match[2]}/${match[3]}`
   }
@@ -124,17 +130,30 @@ async function collectDeletePaths(row: DebugLogRow) {
     return [
       row.filePath,
       row.jsonPath,
+      inferHtmlPath(row),
       ...(entry.assetFiles?.map((asset) => asset.filePath) ?? []),
     ]
   } catch (error) {
     logger.warn(`读取待删除调试日志失败: ${row.id}`, error)
-    return [row.filePath, row.jsonPath]
+    return [row.filePath, row.jsonPath, inferHtmlPath(row)]
   }
 }
 
-function formatEntryOverview(entry: DebugEntry, row: Pick<DebugLogRow, 'filePath' | 'jsonPath' | 'summary'>) {
+function inferHtmlPath(row: Pick<DebugLogRow, 'filePath' | 'htmlPath'>) {
+  if (row.htmlPath) return row.htmlPath
+  if (!row.filePath) return undefined
+
+  const mdDir = path.dirname(row.filePath)
+  if (path.basename(mdDir) !== 'md') return undefined
+  const dayDir = path.dirname(mdDir)
+  const stem = path.basename(row.filePath, path.extname(row.filePath))
+  return path.join(dayDir, 'html', `${stem}.html`)
+}
+
+function formatEntryOverview(entry: DebugEntry, row: Pick<DebugLogRow, 'filePath' | 'jsonPath' | 'htmlPath' | 'summary'>) {
   const markdownPath = describeStoredFile(row.filePath)
   const jsonPath = describeStoredFile(row.jsonPath)
+  const htmlPath = describeStoredFile(row.htmlPath)
   const lines = [
     formatMetadataLine('ID', entry.metadata.id),
     formatMetadataLine('来源', entry.metadata.source),
@@ -152,6 +171,7 @@ function formatEntryOverview(entry: DebugEntry, row: Pick<DebugLogRow, 'filePath
     formatMetadataLine('资产文件', entry.assetFiles?.length ?? 0),
     markdownPath ? `Markdown: ${markdownPath}` : undefined,
     jsonPath ? `JSON: ${jsonPath}` : undefined,
+    htmlPath ? `HTML: ${htmlPath}` : undefined,
     `摘要: ${row.summary}`,
   ].filter(Boolean)
   return lines.join('\n')
@@ -210,30 +230,200 @@ async function loadEntry(row: any) {
   return buildFallbackEntry(typedRow, markdown)
 }
 
-function dispatchOnce(session: Session, content: string | ReturnType<typeof h>) {
-  void session.send(content).catch((error) => {
-    logger.warn('调试预览发送结果已忽略（已按单次发送处理）:', error)
-  })
+interface LocalAssetsLike {
+  root?: string
+  baseUrl?: string
+  stats?: () => Promise<unknown>
+  write?: (buffer: Buffer, filename: string) => Promise<void>
 }
 
-async function sendImageBuffers(session: Session, buffers: Buffer[], mode: DebugCaptureConfig['sendMode'], batchSize: number) {
-  if (!buffers.length) return
-  if (mode === 'text') {
-    return
+async function writeLocalImageAsset(ctx: Context, buffer: Buffer, index: number) {
+  const assets = (ctx as any).assets as LocalAssetsLike | undefined
+  if (!assets || typeof assets.write !== 'function') {
+    logger.warn('assets-local 服务不可用，无法发送调试预览图片 URL')
+    return null
   }
 
-  if (buffers.length === 1 || mode === 'image') {
-    for (const buffer of buffers) {
-      await session.send(h.image(buffer, 'image/png'))
+  if (!assets.root || !assets.baseUrl || assets.baseUrl === 'file:') {
+    logger.warn('assets-local 未配置可访问的 selfUrl，无法生成调试预览图片 URL')
+    return null
+  }
+
+  if (typeof assets.stats === 'function') {
+    await assets.stats()
+  }
+
+  const hash = createHash('sha1').update(buffer).digest('hex')
+  const filename = `${hash}-${index + 1}.png`
+  const savePath = path.resolve(assets.root, filename)
+  await assets.write(buffer, savePath)
+  return `${String(assets.baseUrl).replace(/\/+$/, '')}/${filename}`
+}
+
+async function sendImageBuffers(ctx: Context, session: Session, buffers: Buffer[], batchSize: number) {
+  if (!buffers.length) return false
+
+  const urls: string[] = []
+  for (const [index, buffer] of buffers.entries()) {
+    const url = await writeLocalImageAsset(ctx, buffer, index)
+    if (!url) return false
+    urls.push(url)
+  }
+
+  if (buffers.length === 1) {
+    for (const url of urls) {
+      await session.send(h.image(url))
     }
-    return
+    return true
   }
 
-  for (let index = 0; index < buffers.length; index += batchSize) {
-    const batch = buffers.slice(index, index + batchSize)
-    const figure = h('figure', {}, batch.map((buffer) => h('message', {}, [h.image(buffer, 'image/png')])))
-    dispatchOnce(session, figure)
+  for (let index = 0; index < urls.length; index += batchSize) {
+    const batch = urls.slice(index, index + batchSize)
+    const figure = h('figure', {}, batch.map((url) => h('message', {}, [h.image(url)])))
+    await session.send(figure)
   }
+
+  return true
+}
+
+function parseUsage(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  try {
+    return JSON.parse(value)
+  } catch {
+    return value
+  }
+}
+
+function pickNumericField(value: unknown, keys: string[]): number | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  for (const key of keys) {
+    const item = record[key]
+    if (typeof item === 'number' && Number.isFinite(item)) return item
+  }
+  return undefined
+}
+
+function formatTotalTokens(usage: unknown) {
+  const parsed = parseUsage(usage)
+  const direct = pickNumericField(parsed, ['total_tokens', 'totalTokens', 'total_token_count', 'totalTokenCount', 'total'])
+  if (direct != null) return String(direct)
+
+  const prompt = pickNumericField(parsed, ['prompt_tokens', 'promptTokens', 'input_tokens', 'inputTokens'])
+  const completion = pickNumericField(parsed, ['completion_tokens', 'completionTokens', 'output_tokens', 'outputTokens'])
+  if (prompt != null || completion != null) {
+    return String((prompt ?? 0) + (completion ?? 0))
+  }
+
+  return '-'
+}
+
+function formatUtc8Time(timestamp: number) {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(timestamp))
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return `${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}:${values.second} UTC+8`
+}
+
+function buildHtmlFileMetadataText(entry: DebugEntry, htmlPath: string, generatedAt: number) {
+  return [
+    'ChatLuna 调试 HTML 报告',
+    `- 报告生成时间: ${formatUtc8Time(generatedAt)}`,
+    `- 响应模型: ${entry.metadata.resolvedModel || entry.metadata.model || '-'}`,
+    `- 总使用 token: ${formatTotalTokens(entry.metadata.usage)}`,
+    `- 日志 ID: ${entry.metadata.id}`,
+    `- 文件名: ${path.basename(htmlPath)}`,
+  ].join('\n')
+}
+
+interface OneBotForwardSender {
+  sendGroupForwardMsg?: (groupId: string, messages: unknown[]) => Promise<unknown>
+  sendPrivateForwardMsg?: (userId: string, messages: unknown[]) => Promise<unknown>
+}
+
+function getOneBotForwardSender(session: Session): OneBotForwardSender | undefined {
+  const onebot = (session as any).onebot
+  if (!onebot) return undefined
+  return onebot as OneBotForwardSender
+}
+
+function getForwardTarget(session: Session) {
+  const channelId = String(session.channelId || '')
+  const userId = String(session.userId || '')
+  const isDirect = Boolean(session.isDirect || channelId.startsWith('private:'))
+  if (isDirect) {
+    return {
+      isDirect,
+      id: channelId.startsWith('private:') ? channelId.slice('private:'.length) : userId,
+    }
+  }
+  return { isDirect, id: channelId || String(session.guildId || '') }
+}
+
+async function sendHtmlFileForward(session: Session, metadataText: string, htmlPath: string, generatedAt: number) {
+  const sender = getOneBotForwardSender(session)
+  if (!sender) throw new Error('OneBot internal sender is unavailable')
+
+  const target = getForwardTarget(session)
+  if (!target.id) throw new Error('OneBot forward target is unavailable')
+
+  const fileName = path.basename(htmlPath)
+  const bot = (session as any).bot
+  const authorName = bot?.user?.name || 'ChatLuna Debug'
+  const authorUin = String(session.selfId || bot?.selfId || bot?.userId || 0)
+  const baseNodeData = {
+    name: authorName,
+    uin: authorUin,
+    time: `${Math.floor(generatedAt / 1000)}`,
+  }
+  const messages = [
+    {
+      type: 'node',
+      data: {
+        ...baseNodeData,
+        content: [{ type: 'text', data: { text: metadataText } }],
+      },
+    },
+    {
+      type: 'node',
+      data: {
+        ...baseNodeData,
+        content: [{
+          type: 'file',
+          data: {
+            file: pathToFileURL(htmlPath).href,
+            name: fileName,
+          },
+        }],
+      },
+    },
+  ]
+
+  if (target.isDirect) {
+    if (typeof sender.sendPrivateForwardMsg !== 'function') throw new Error('sendPrivateForwardMsg is unavailable')
+    await sender.sendPrivateForwardMsg(target.id, messages)
+    return true
+  }
+
+  if (typeof sender.sendGroupForwardMsg !== 'function') throw new Error('sendGroupForwardMsg is unavailable')
+  await sender.sendGroupForwardMsg(target.id, messages)
+  return true
+}
+
+async function markHtmlPath(ctx: Context, row: DebugLogRow, htmlPath: string) {
+  await (ctx.database as any).upsert(DEBUG_LOG_TABLE, [{
+    ...row,
+    htmlPath,
+  }] as any)
 }
 
 export function registerCommands(ctx: Context, config: DebugCaptureConfig, runtime: DebugRuntimeController) {
@@ -312,8 +502,8 @@ export function registerCommands(ctx: Context, config: DebugCaptureConfig, runti
       const filePath = row.filePath as string
       const markdown = await readMarkdownFile(filePath)
       const previewText = clipPreview(markdown, config.maxPreviewChars)
-      if (!config.renderImageOnCommand) return previewText
-      return sendPreview(session, previewText, config.sendMode)
+      if (normalizeSendMode(config) === 'text') return previewText
+      return sendPreview(session, previewText)
     })
 
   command.subcommand('.send <id:text>', text(undefined, 'commands.chat-debug.send.description'))
@@ -322,13 +512,40 @@ export function registerCommands(ctx: Context, config: DebugCaptureConfig, runti
       const row = await findRow(ctx, id)
       if (!row) return text(session, 'commands.chat-debug.messages.not-found')
       const entry = await loadEntry(row)
+      const mode = normalizeSendMode(config)
+      if (mode === 'text') {
+        const { markdown } = renderDebugPreviewHtml(entry, config, {
+          sourcePath: row.filePath as string | undefined,
+        })
+        return clipPreview(markdown, config.maxPreviewChars)
+      }
+
+      if (mode === 'html') {
+        const generatedAt = Date.now()
+        const { markdown, html } = renderDebugPreviewHtml(entry, config, {
+          sourcePath: row.filePath as string | undefined,
+          stripCollapsedSystemPrompt: config.collapseSystemPromptOnRender ?? false,
+        })
+        try {
+          const htmlPath = await writeHtmlFile(ctx, config.storageDir, entry.metadata.id, entry.metadata.createdAt, html)
+          await markHtmlPath(ctx, row, htmlPath)
+          const metadataText = buildHtmlFileMetadataText(entry, htmlPath, generatedAt)
+          await sendHtmlFileForward(session, metadataText, htmlPath, generatedAt)
+          return
+        } catch (error) {
+          logger.warn('发送 HTML 调试文件失败，回退到 Markdown 文本预览:', error)
+          return clipPreview(markdown, config.maxPreviewChars)
+        }
+      }
+
       const preview = await renderDebugPreview(ctx, entry, config, {
         sourcePath: row.filePath as string | undefined,
       })
       if (preview.tooLarge || !preview.buffers?.length) {
         return clipPreview(preview.markdown, config.maxPreviewChars)
       }
-      await sendImageBuffers(session, preview.buffers, config.sendMode, config.mergeForwardBatchSize)
+      const sent = await sendImageBuffers(ctx, session, preview.buffers, config.mergeForwardBatchSize)
+      if (!sent) return clipPreview(preview.markdown, config.maxPreviewChars)
       return
     })
 

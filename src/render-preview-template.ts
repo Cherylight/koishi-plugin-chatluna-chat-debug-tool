@@ -42,6 +42,7 @@ export interface BuildDebugPreviewHtmlOptions {
   sourcePath?: string
   collapseJsonByDefault?: boolean
   collapseSystemPromptByDefault?: boolean
+  stripCollapsedSystemPrompt?: boolean
   embedChatImages?: boolean
   titleSuffix?: string
   metaLabel?: string
@@ -470,6 +471,16 @@ function renderSystemPromptSection(
   options: BuildDebugPreviewHtmlOptions,
 ) {
   const preview = buildSystemPromptPreview(contentBlocks)
+  if (options.collapseSystemPromptByDefault && options.stripCollapsedSystemPrompt) {
+    return [
+      `<section class="message-card role-system" id="${block.id}">`,
+      `<h3 class="role-system">${escapeHtml(headingLabel)}</h3>`,
+      `<pre class="system-prompt-preview"><code>${escapeHtml(preview)}</code></pre>`,
+      '<div class="system-prompt-hidden-note">...已剔除</div>',
+      '</section>',
+    ].join('')
+  }
+
   const openAttr = options.collapseSystemPromptByDefault ? '' : ' open'
   let bodyHtml = ''
   let fenceIndex = 0

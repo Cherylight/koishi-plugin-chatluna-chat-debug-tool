@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chatluna-chat-debug-tool",
-  "description": "ChatLuna chat debugging logs with Markdown export and image previews.",
-  "version": "1.0.4",
+  "description": "ChatLuna chat debugging logs with Markdown export, image previews, and HTML file reports.",
+  "version": "1.0.5",
   "type": "module",
   "main": "lib/index.cjs",
   "module": "lib/index.mjs",
@@ -35,7 +35,8 @@
     "debug",
     "logging",
     "markdown",
-    "image"
+    "image",
+    "html"
   ],
   "license": "MIT",
   "peerDependencies": {
@@ -54,12 +55,13 @@
   },
   "koishi": {
     "description": {
-      "zh": "ChatLuna 聊天调试日志导出为 Markdown，并可渲染为图片发送"
+      "zh": "ChatLuna 聊天调试日志导出为 Markdown，并可渲染为图片或 HTML 文件发送"
     },
     "service": {
       "optional": [
         "chatluna",
-        "puppeteer"
+        "puppeteer",
+        "assets"
       ]
     }
   }

@@ -14,6 +14,7 @@ export interface RenderResult {
 
 export interface RenderPreviewOptions {
   sourcePath?: string
+  stripCollapsedSystemPrompt?: boolean
 }
 
 interface RenderOptions {
@@ -34,6 +35,25 @@ function normalizeRenderOptions(config?: Partial<DebugCaptureConfig>): RenderOpt
     imageMaxBytes: config?.imageMaxBytes ?? DEFAULT_RENDER_OPTIONS.imageMaxBytes,
     chunkHeight: DEFAULT_RENDER_OPTIONS.chunkHeight,
   }
+}
+
+export function renderDebugPreviewHtml(
+  entry: DebugEntry,
+  config?: Partial<DebugCaptureConfig>,
+  previewOptions: RenderPreviewOptions = {},
+) {
+  const markdown = renderDebugMarkdown(entry)
+  const html = buildDebugPreviewHtml(markdown, {
+    sourcePath: previewOptions.sourcePath,
+    titleSuffix: '请求 / 响应',
+    metaLabel: '结构化调试预览',
+    collapseJsonByDefault: config?.collapseJsonOnRender ?? true,
+    collapseSystemPromptByDefault: config?.collapseSystemPromptOnRender ?? false,
+    stripCollapsedSystemPrompt: previewOptions.stripCollapsedSystemPrompt ?? false,
+    embedChatImages: config?.embedChatImagesOnRender ?? false,
+  })
+
+  return { markdown, html }
 }
 
 async function screenshotWithTimeout(page: any, clip: { x: number, y: number, width: number, height: number }, renderTimeoutMs: number) {
@@ -94,7 +114,7 @@ export async function renderDebugPreview(
   config?: Partial<DebugCaptureConfig>,
   previewOptions: RenderPreviewOptions = {},
 ): Promise<RenderResult> {
-  const markdown = renderDebugMarkdown(entry)
+  const { markdown, html } = renderDebugPreviewHtml(entry, config, previewOptions)
   const markdownBuffer = Buffer.from(markdown, 'utf8')
   if (markdownBuffer.length > 5 * 1024 * 1024) {
     return { markdown, tooLarge: true }
@@ -111,14 +131,7 @@ export async function renderDebugPreview(
   try {
     page = await puppeteerService.page()
     await page.setViewport({ width: 1360, height: 2200, deviceScaleFactor: 1.5 })
-    await page.setContent(buildDebugPreviewHtml(markdown, {
-      sourcePath: previewOptions.sourcePath,
-      titleSuffix: '请求 / 响应',
-      metaLabel: '结构化调试预览',
-      collapseJsonByDefault: config?.collapseJsonOnRender ?? true,
-      collapseSystemPromptByDefault: config?.collapseSystemPromptOnRender ?? false,
-      embedChatImages: config?.embedChatImagesOnRender ?? false,
-    }), { waitUntil: 'load' })
+    await page.setContent(html, { waitUntil: 'load' })
 
     const buffers = await screenshotPaginated(page, '#debug-preview-root', options)
     if (buffers.some((image) => image.length > options.imageMaxBytes)) {
