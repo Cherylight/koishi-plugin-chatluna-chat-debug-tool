@@ -17,6 +17,15 @@ export const Config: Schema<DebugCaptureConfig> = Schema.object({
   captureEnabled: Schema.boolean()
     .default(false)
     .description('是否捕获请求与响应'),
+  capturePendingRequests: Schema.boolean()
+    .default(false)
+    .description('是否在匹配请求开始后先写入仅包含请求的临时调试日志；完整响应成功后会替换为请求与响应日志，失败时保留请求日志并尽量记录错误'),
+  captureNonChatRequests: Schema.boolean()
+    .default(false)
+    .description('是否允许捕获非聊天请求（包括 /mcp 与 JSON-RPC）；关闭时默认跳过这类流量，开启后仍需命中过滤关键字'),
+  excludeEmbeddingRequests: Schema.boolean()
+    .default(false)
+    .description('是否排除 Embedding 请求日志；默认不排除，开启后跳过 /embeddings 端点或 embedding 模型请求'),
   writeMarkdown: Schema.boolean()
     .default(true)
     .description('是否将日志写入 Markdown 文件'),

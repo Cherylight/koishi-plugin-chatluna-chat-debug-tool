@@ -2,7 +2,7 @@
 import { ChatLunaPlugin } from 'koishi-plugin-chatluna/services/chat'
 import { logger } from './logger'
 import type { DebugCaptureConfig, DebugEntry, DebugMessagePart, DebugToolCall, DebugToolDefinition, DebugToolResult } from './types'
-import { rewriteDebugEntryAssets, saveDebugEntry } from './storage'
+import { DEBUG_LOG_TABLE, removeDebugFiles, rewriteDebugEntryAssets, saveDebugEntry, type DebugLogRow } from './storage'
 import { renderDebugMarkdown } from './markdown'
 
 const originalFetchMap = new WeakMap<object, Function>()
@@ -292,10 +292,56 @@ function extractStructuredResponse(json: any): { messages: DebugMessagePart[]; t
   }
 }
 
-function shouldCapture(url: string, bodyText: string | undefined, config: DebugCaptureConfig): boolean {
+function hasJsonRpcPayload(body: unknown): boolean {
+  if (Array.isArray(body)) {
+    return body.some((item) => hasJsonRpcPayload(item))
+  }
+  if (!body || typeof body !== 'object') return false
+
+  const value = body as { jsonrpc?: unknown; method?: unknown }
+  return typeof value.jsonrpc === 'string' && typeof value.method === 'string'
+}
+
+function hasLlmRequestShape(body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false
+
+  const value = body as { messages?: unknown; input?: unknown }
+  return Array.isArray(value.messages) || Array.isArray(value.input)
+}
+
+function isEmbeddingRequest(url: string, body: unknown): boolean {
+  const normalizedUrl = url.toLowerCase()
+  if (normalizedUrl.includes('/embeddings')) return true
+
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false
+
+  const value = body as { model?: unknown }
+  return typeof value.model === 'string' && value.model.toLowerCase().includes('embedding')
+}
+
+function shouldCapture(url: string, bodyText: string | undefined, bodyJson: unknown, config: DebugCaptureConfig): boolean {
   if (!config.captureEnabled) return false
+
+  const normalizedUrl = url.toLowerCase()
+  if (config.excludeEmbeddingRequests && isEmbeddingRequest(normalizedUrl, bodyJson)) return false
+
+  const isMcpRequest = normalizedUrl.includes('/mcp')
+  const isJsonRpcRequest = hasJsonRpcPayload(bodyJson)
+  const isKnownLlmEndpoint = normalizedUrl.includes('/chat/completions') || normalizedUrl.includes('/responses')
+  const hasKnownLlmBody = hasLlmRequestShape(bodyJson)
+  const isKnownChatRequest = isKnownLlmEndpoint || hasKnownLlmBody
+  const captureNonChatRequests = Boolean(config.captureNonChatRequests)
+
+  if (!captureNonChatRequests) {
+    if (isMcpRequest) return false
+    if (isJsonRpcRequest) return false
+    if (!isKnownChatRequest) return false
+  }
+
   if (!config.captureFilters.length) return true
-  return config.captureFilters.some((filter) => url.includes(filter) || bodyText?.includes(filter))
+
+  const matchesConfiguredFilter = config.captureFilters.some((filter) => url.includes(filter) || bodyText?.includes(filter))
+  return matchesConfiguredFilter || isKnownChatRequest
 }
 
 function tryParseJson(text: string): unknown {
@@ -553,6 +599,44 @@ function parseBodyValue(body: BodyInit | null | undefined): { text?: string; jso
   return {}
 }
 
+function formatErrorMessage(error: unknown): string {
+  if (!error) return 'Unknown error'
+  if (error instanceof Error) return error.message || error.name
+  if (typeof error === 'object') {
+    const value = error as { message?: unknown; name?: unknown }
+    if (typeof value.message === 'string') return value.message
+    if (typeof value.name === 'string') return value.name
+  }
+  return String(error)
+}
+
+async function removeSavedDebugEntry(ctx: Context, row: DebugLogRow | undefined) {
+  if (!row) return
+
+  await removeDebugFiles([row.filePath, row.jsonPath, row.htmlPath])
+  try {
+    await (ctx.database as any).remove(DEBUG_LOG_TABLE, { id: row.id } as any)
+  } catch (error) {
+    logger.warn(`删除临时调试索引失败: ${row.id}`, error)
+  }
+}
+
+async function persistDebugEntry(
+  ctx: Context,
+  config: DebugCaptureConfig,
+  entry: DebugEntry,
+  hookMessage: string,
+  logSavedPath: boolean,
+) {
+  const rewrittenEntry = await rewriteDebugEntryAssets(ctx, config.storageDir, entry)
+  const markdown = renderDebugMarkdown(rewrittenEntry)
+  const row = await saveDebugEntry(ctx, rewrittenEntry, markdown, config.storageDir)
+  if (logSavedPath) {
+    logger.info(`${hookMessage}, 日志已保存到${row.filePath}`)
+  }
+  return row
+}
+
 async function normalizeRequest(info: RequestInfo, init?: RequestInit) {
   const request = info instanceof Request ? info : undefined
   const requestUrl = typeof info === 'string'
@@ -628,14 +712,63 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
         }
       : undefined
 
-    const matched = shouldCapture(normalizedRequest.requestUrl, requestBody.text, config)
-    logger.info(`ChatLuna 调试请求经过 hook: matched=${matched}, method=${normalizedRequest.method}, url=${normalizedRequest.requestUrl}`)
+    const matched = shouldCapture(normalizedRequest.requestUrl, requestBody.text, requestBody.json, config)
+    const hookMessage = `ChatLuna 调试请求经过 hook: matched=${matched}, method=${normalizedRequest.method}, url=${normalizedRequest.requestUrl}`
+    if (matched) {
+      logger.info(hookMessage)
+    } else {
+      logger.debug(hookMessage)
+    }
 
     if (!matched) {
       return originalFetch.call(this, info, init, proxy)
     }
 
     const id = nowId()
+    const createRequestOnlyEntry = (error?: unknown): DebugEntry => {
+      const completedAt = Date.now()
+      const errorMessage = error == null ? undefined : formatErrorMessage(error)
+      return {
+        metadata: {
+          id,
+          createdAt: startedAt,
+          endAt: errorMessage ? completedAt : undefined,
+          durationMs: completedAt - startedAt,
+          source: 'chatluna',
+          requestType,
+          model,
+          method: normalizedRequest.method,
+          url: normalizedRequest.requestUrl,
+          requestBytes: requestBody.text ? Buffer.byteLength(requestBody.text) : undefined,
+          maxTokens: (requestBody.json as any)?.max_tokens,
+          maxOutputTokens: (requestBody.json as any)?.max_output_tokens,
+          reasoning: (requestBody.json as any)?.reasoning,
+          otherOptions,
+          error: errorMessage,
+        },
+        tools,
+        requestMessages,
+        responseMessages: [],
+        toolCalls: structuredRequest.toolCalls,
+        toolResults: structuredRequest.toolResults,
+        responseText: '',
+        requestBodyText: requestBody.text,
+        requestBodyJson: requestBody.json,
+        requestHeaders,
+        responseHeaders: {},
+      }
+    }
+
+    const capturePendingRequests = Boolean(config.capturePendingRequests)
+    let pendingSavePromise: Promise<DebugLogRow | undefined> | undefined
+    if (config.writeMarkdown && capturePendingRequests) {
+      pendingSavePromise = persistDebugEntry(ctx, config, createRequestOnlyEntry(), hookMessage, false)
+        .catch((error) => {
+          logger.warn('保存请求调试日志失败:', error)
+          return undefined
+        })
+      void pendingSavePromise
+    }
 
     try {
       const response: Response = await originalFetch.call(this, info, init, proxy)
@@ -643,7 +776,7 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
 
       if (config.writeMarkdown) {
         void readResponseBody(response, new Set(tools.map((tool) => tool.name).filter(Boolean)))
-          .then((responseBody) => {
+          .then(async (responseBody) => {
             const structuredResponse = extractStructuredResponse(responseBody.json)
             const requestId = pickHeader(responseHeaders, ['x-request-id', 'request-id'])
             const serverRequestId = pickHeader(responseHeaders, ['x-ms-request-id', 'trace-id', 'x-trace-id']) || requestId
@@ -687,57 +820,41 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
               responseHeaders,
             }
 
-            return rewriteDebugEntryAssets(ctx, config.storageDir, entry)
-              .then((rewrittenEntry) => {
-                const markdown = renderDebugMarkdown(rewrittenEntry)
-                return saveDebugEntry(ctx, rewrittenEntry, markdown, config.storageDir)
-              })
+            const pendingRow = pendingSavePromise ? await pendingSavePromise : undefined
+            await removeSavedDebugEntry(ctx, pendingRow)
+            return persistDebugEntry(ctx, config, entry, hookMessage, true)
           })
-          .catch((error) => {
+          .catch(async (error) => {
             if (isAbortError(error)) {
-              logger.debug('调试日志响应体读取被上游取消，跳过本次保存')
+              logger.debug(capturePendingRequests
+                ? '调试日志响应体读取被上游取消，保留请求日志'
+                : '调试日志响应体读取被上游取消，跳过本次保存')
+            } else {
+              logger.warn(capturePendingRequests
+                ? '保存调试日志失败，保留请求日志:'
+                : '保存调试日志失败:', error)
+            }
+
+            if (!capturePendingRequests) {
               return
             }
-            logger.warn('保存调试日志失败:', error)
+
+            try {
+              if (pendingSavePromise) await pendingSavePromise
+              await persistDebugEntry(ctx, config, createRequestOnlyEntry(error), hookMessage, true)
+            } catch (saveError) {
+              logger.warn('更新请求调试日志失败:', saveError)
+            }
           })
       }
 
       return response
     } catch (error: any) {
-      const entry: DebugEntry = {
-        metadata: {
-          id,
-          createdAt: startedAt,
-          endAt: Date.now(),
-          durationMs: Date.now() - startedAt,
-          source: 'chatluna',
-          requestType,
-          model,
-          method: normalizedRequest.method,
-          url: normalizedRequest.requestUrl,
-          maxTokens: (requestBody.json as any)?.max_tokens,
-          maxOutputTokens: (requestBody.json as any)?.max_output_tokens,
-          reasoning: (requestBody.json as any)?.reasoning,
-          otherOptions,
-          error: error?.message || String(error),
-        },
-        tools,
-        requestMessages,
-        responseMessages: [],
-        toolCalls: structuredRequest.toolCalls,
-        toolResults: structuredRequest.toolResults,
-        responseText: '',
-        requestBodyText: requestBody.text,
-        requestBodyJson: requestBody.json,
-        requestHeaders,
-        responseHeaders: {},
-      }
       if (config.writeMarkdown) {
-        void rewriteDebugEntryAssets(ctx, config.storageDir, entry)
-          .then((rewrittenEntry) => {
-            const markdown = renderDebugMarkdown(rewrittenEntry)
-            return saveDebugEntry(ctx, rewrittenEntry, markdown, config.storageDir)
-          })
+        void (async () => {
+          if (pendingSavePromise) await pendingSavePromise
+          return persistDebugEntry(ctx, config, createRequestOnlyEntry(error), hookMessage, true)
+        })()
           .catch((saveError) => {
             logger.warn('保存失败请求日志失败:', saveError)
           })

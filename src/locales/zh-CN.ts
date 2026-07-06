@@ -19,6 +19,8 @@ export default {
   'commands.chat-debug.messages.list.empty-page': '第 {page} 页没有可用的调试日志。',
   'commands.chat-debug.messages.not-found': '未找到指定日志。',
   'commands.chat-debug.messages.delete.success': '已删除调试日志：{id}',
+  'commands.chat-debug.messages.delete.failed': '删除调试日志失败：{id}，{failures} 个文件未删除，数据库索引已保留。首个失败：{firstFailure}',
   'commands.chat-debug.messages.clean.empty': '没有需要清理的日志，当前保留数：{count}',
-  'commands.chat-debug.messages.clean.success': '已清理 {count} 条旧日志，保留最新 {keep} 条。',
+  'commands.chat-debug.messages.clean.success': '已清理 {indexed} 条索引日志、{orphan} 个孤儿文件，保留最新 {keep} 条。',
+  'commands.chat-debug.messages.clean.with-failures': '已清理 {indexed} 条索引日志、{orphan} 个孤儿文件，保留最新 {keep} 条；{failures} 个删除失败，详见日志。首个失败：{firstFailure}',
 }

@@ -1,8 +1,7 @@
 ﻿import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { Context } from 'koishi'
-import { logger } from './logger'
+import type { Context } from 'koishi'
 import type { DebugAssetFile, DebugEntry, DebugMetadata } from './types'
 
 export const DEBUG_LOG_TABLE = 'chatluna_debug_logs'
@@ -17,7 +16,33 @@ export interface DebugLogRow extends Omit<DebugMetadata, 'reasoning' | 'otherOpt
   summary: string
 }
 
+export interface DebugDeleteFailure {
+  filePath: string
+  code?: string
+  message: string
+}
+
+export interface RemoveDebugFilesResult {
+  removed: number
+  missing: number
+  failures: DebugDeleteFailure[]
+}
+
+export interface PruneDebugDirsResult {
+  removed: number
+  failures: DebugDeleteFailure[]
+}
+
 const DATA_URI_PATTERN = /data:(image\/[a-zA-Z0-9.+-]+);base64,([a-zA-Z0-9+/=\r\n]+)/g
+
+async function warnStorage(message: string, error: unknown) {
+  try {
+    const { logger } = await import('./logger')
+    logger.warn(message, error)
+  } catch {
+    console.warn(message, error)
+  }
+}
 
 function resolveDebugDay(createdAt: number): string {
   return new Date(createdAt).toISOString().slice(0, 10)
@@ -93,14 +118,80 @@ export async function writeHtmlFile(ctx: Context, storageDir: string, id: string
   return filePath
 }
 
-export async function removeDebugFiles(paths: Array<string | undefined>) {
-  await Promise.all(paths.filter(Boolean).map(async (filePath) => {
+function getErrorCode(error: unknown) {
+  return typeof error === 'object' && error && 'code' in error
+    ? String((error as NodeJS.ErrnoException).code)
+    : undefined
+}
+
+function toDeleteFailure(filePath: string, error: unknown): DebugDeleteFailure {
+  return {
+    filePath,
+    code: getErrorCode(error),
+    message: error instanceof Error ? error.message : String(error),
+  }
+}
+
+export function normalizeDebugFilePath(filePath: string) {
+  const normalized = path.normalize(path.resolve(filePath))
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+async function walkFiles(directoryPath: string, result: string[]) {
+  const entries = await fs.readdir(directoryPath, { withFileTypes: true }).catch(() => null)
+  if (!entries) return
+
+  for (const entry of entries) {
+    const fullPath = path.join(directoryPath, entry.name)
+    if (entry.isFile()) {
+      result.push(fullPath)
+    } else if (entry.isDirectory()) {
+      await walkFiles(fullPath, result)
+    }
+  }
+}
+
+export async function listDebugStorageFiles(ctx: Context, storageDir: string) {
+  const baseDir = path.join(ctx.baseDir, 'data', storageDir)
+  const dayEntries = await fs.readdir(baseDir, { withFileTypes: true }).catch(() => null)
+  if (!dayEntries) return [] as string[]
+
+  const files: string[] = []
+  for (const dayEntry of dayEntries) {
+    if (!dayEntry.isDirectory()) continue
+    const dayDir = path.join(baseDir, dayEntry.name)
+    for (const category of ['md', 'json', 'html', 'files']) {
+      await walkFiles(path.join(dayDir, category), files)
+    }
+  }
+  return files
+}
+
+export async function removeDebugFiles(paths: Array<string | undefined>): Promise<RemoveDebugFilesResult> {
+  const result: RemoveDebugFilesResult = {
+    removed: 0,
+    missing: 0,
+    failures: [],
+  }
+  const uniquePaths = Array.from(new Set(paths.filter(Boolean) as string[]))
+
+  await Promise.all(uniquePaths.map(async (filePath) => {
     try {
-      await fs.rm(filePath!, { force: true })
+      await fs.rm(filePath)
+      result.removed += 1
     } catch (error) {
-      logger.warn(`删除调试文件失败: ${filePath}`, error)
+      if (getErrorCode(error) === 'ENOENT') {
+        result.missing += 1
+        return
+      }
+
+      const failure = toDeleteFailure(filePath, error)
+      result.failures.push(failure)
+      await warnStorage(`删除调试文件失败: ${filePath}`, error)
     }
   }))
+
+  return result
 }
 
 async function directoryContainsFiles(directoryPath: string): Promise<boolean> {
@@ -124,27 +215,31 @@ async function directoryContainsFiles(directoryPath: string): Promise<boolean> {
   return false
 }
 
-export async function pruneEmptyDebugDayDirs(ctx: Context, storageDir: string) {
+export async function pruneEmptyDebugDayDirs(ctx: Context, storageDir: string): Promise<PruneDebugDirsResult> {
   const baseDir = path.join(ctx.baseDir, 'data', storageDir)
   const entries = await fs.readdir(baseDir, { withFileTypes: true }).catch(() => null)
   if (!entries) {
-    return 0
+    return { removed: 0, failures: [] }
   }
 
-  let removedCount = 0
+  const result: PruneDebugDirsResult = {
+    removed: 0,
+    failures: [],
+  }
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
     const dayDir = path.join(baseDir, entry.name)
     if (await directoryContainsFiles(dayDir)) continue
     try {
       await fs.rm(dayDir, { recursive: true, force: true })
-      removedCount += 1
+      result.removed += 1
     } catch (error) {
-      logger.warn(`移除空调试目录失败: ${dayDir}`, error)
+      result.failures.push(toDeleteFailure(dayDir, error))
+      await warnStorage(`移除空调试目录失败: ${dayDir}`, error)
     }
   }
 
-  return removedCount
+  return result
 }
 
 function serializeUnknown(value: unknown): string | undefined {
@@ -345,7 +440,7 @@ export async function saveDebugEntry(ctx: Context, entry: DebugEntry, markdown: 
   try {
     await (ctx.database as any).upsert(DEBUG_LOG_TABLE, [row])
   } catch (error) {
-    logger.warn('写入调试索引失败:', error)
+    await warnStorage('写入调试索引失败:', error)
   }
   return row
 }

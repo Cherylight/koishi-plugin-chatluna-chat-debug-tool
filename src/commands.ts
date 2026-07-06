@@ -3,10 +3,17 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { h, type Context, type Session } from 'koishi'
 import type { DebugCaptureConfig, DebugEntry } from './types'
-import { DEBUG_LOG_TABLE, pruneEmptyDebugDayDirs, readDebugEntry, readMarkdownFile, removeDebugFiles, writeHtmlFile, type DebugLogRow } from './storage'
+import {
+  DEBUG_LOG_TABLE,
+  readDebugEntry,
+  readMarkdownFile,
+  writeHtmlFile,
+  type DebugLogRow,
+} from './storage'
 import { renderDebugPreview, renderDebugPreviewHtml } from './render-image'
 import { logger } from './logger'
 import zhCN from './locales/zh-CN'
+import { cleanDebugLogs, deleteDebugLog } from './clean'
 
 export interface DebugRuntimeController {
   isHookInstalled(): boolean
@@ -122,21 +129,6 @@ function formatRelativeAge(createdAt?: number, now = Date.now()) {
 async function findRow(ctx: Context, id: string) {
   const [row] = await (ctx.database as any).get(DEBUG_LOG_TABLE, { id } as any)
   return row as DebugLogRow | undefined
-}
-
-async function collectDeletePaths(row: DebugLogRow) {
-  try {
-    const entry = await loadEntry(row)
-    return [
-      row.filePath,
-      row.jsonPath,
-      inferHtmlPath(row),
-      ...(entry.assetFiles?.map((asset) => asset.filePath) ?? []),
-    ]
-  } catch (error) {
-    logger.warn(`读取待删除调试日志失败: ${row.id}`, error)
-    return [row.filePath, row.jsonPath, inferHtmlPath(row)]
-  }
 }
 
 function inferHtmlPath(row: Pick<DebugLogRow, 'filePath' | 'htmlPath'>) {
@@ -553,30 +545,38 @@ export function registerCommands(ctx: Context, config: DebugCaptureConfig, runti
     .action(async ({ session }, id) => {
       const row = await findRow(ctx, id)
       if (!row) return text(session, 'commands.chat-debug.messages.not-found')
-      await removeDebugFiles(await collectDeletePaths(row))
-      await (ctx.database as any).remove(DEBUG_LOG_TABLE, { id: row.id } as any)
+      const result = await deleteDebugLog(ctx, row)
+      if (result.failures.length) {
+        return text(session, 'commands.chat-debug.messages.delete.failed', {
+          id: row.id,
+          failures: result.failures.length,
+          firstFailure: result.failures[0]?.filePath || '-',
+        })
+      }
       return text(session, 'commands.chat-debug.messages.delete.success', { id: row.id })
     })
 
   command.subcommand('.clean [keep:number]', text(undefined, 'commands.chat-debug.clean.description'))
     .action(async ({ session }, keep = config.managerPageSize) => {
-      await pruneEmptyDebugDayDirs(ctx, config.storageDir)
-
-      const safeKeep = Math.max(0, Math.floor(keep))
-      const rows = sortDebugRows(await (ctx.database as any).get(DEBUG_LOG_TABLE, {}) as DebugLogRow[], 'desc')
-      const obsoleteRows = rows.slice(safeKeep) as DebugLogRow[]
-      if (!obsoleteRows.length) {
-        return text(session, 'commands.chat-debug.messages.clean.empty', { count: rows.length })
+      const result = await cleanDebugLogs(ctx, config, keep)
+      if (result.failures.length) {
+        return text(session, 'commands.chat-debug.messages.clean.with-failures', {
+          indexed: result.indexedRowsCleaned,
+          orphan: result.orphanFilesCleaned,
+          keep: result.requestedKeep,
+          failures: result.failures.length,
+          firstFailure: result.failures[0]?.filePath || '-',
+        })
       }
 
-      for (const row of obsoleteRows) {
-        await removeDebugFiles(await collectDeletePaths(row))
-        await (ctx.database as any).remove(DEBUG_LOG_TABLE, { id: row.id } as any)
+      if (!result.indexedRowsCleaned && !result.orphanFilesCleaned) {
+        return text(session, 'commands.chat-debug.messages.clean.empty', { count: result.retainedRows })
       }
-      await pruneEmptyDebugDayDirs(ctx, config.storageDir)
+
       return text(session, 'commands.chat-debug.messages.clean.success', {
-        count: obsoleteRows.length,
-        keep: safeKeep,
+        indexed: result.indexedRowsCleaned,
+        orphan: result.orphanFilesCleaned,
+        keep: result.requestedKeep,
       })
     })
 
