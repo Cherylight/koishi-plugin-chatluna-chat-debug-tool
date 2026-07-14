@@ -600,14 +600,48 @@ function parseBodyValue(body: BodyInit | null | undefined): { text?: string; jso
 }
 
 function formatErrorMessage(error: unknown): string {
+  const parts: string[] = []
+  const seen = new Set<object>()
+  let current = error
+  for (let depth = 0; depth < 4; depth++) {
+    if (!current || typeof current !== 'object' || seen.has(current)) break
+    seen.add(current)
+    parts.push(formatSingleError(current))
+    current = (current as { cause?: unknown }).cause
+  }
+  if (parts.length > 0) return parts.join('; cause: ')
+  return formatSingleError(error)
+}
+
+function formatSingleError(error: unknown): string {
   if (!error) return 'Unknown error'
-  if (error instanceof Error) return error.message || error.name
+  if (error instanceof Error) {
+    const name = error.name && error.name !== 'Error' ? error.name : ''
+    const message = error.message || ''
+    const text =
+      name && message && message !== name
+        ? `${name}: ${message}`
+        : message || name || 'Error'
+    return appendErrorCode(text, error)
+  }
   if (typeof error === 'object') {
     const value = error as { message?: unknown; name?: unknown }
-    if (typeof value.message === 'string') return value.message
-    if (typeof value.name === 'string') return value.name
+    const name = typeof value.name === 'string' ? value.name : ''
+    const message = typeof value.message === 'string' ? value.message : ''
+    const text =
+      name && message && message !== name
+        ? `${name}: ${message}`
+        : message || name || String(error)
+    return appendErrorCode(text, value)
   }
   return String(error)
+}
+
+function appendErrorCode(text: string, error: object): string {
+  const code = 'code' in error ? (error as { code?: unknown }).code : undefined
+  return code == null || text.includes(`[code=${String(code)}]`)
+    ? text
+    : `${text} [code=${String(code)}]`
 }
 
 async function removeSavedDebugEntry(ctx: Context, row: DebugLogRow | undefined) {
