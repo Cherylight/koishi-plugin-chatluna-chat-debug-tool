@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chatluna-chat-debug-tool",
   "description": "ChatLuna chat debugging logs with Markdown export, image previews, and HTML file reports.",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "type": "module",
   "main": "lib/index.cjs",
   "module": "lib/index.mjs",
