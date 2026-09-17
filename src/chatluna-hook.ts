@@ -319,11 +319,26 @@ function isEmbeddingRequest(url: string, body: unknown): boolean {
   return typeof value.model === 'string' && value.model.toLowerCase().includes('embedding')
 }
 
+function containsExcludedRequestBodyKeyword(
+  bodyText: string | undefined,
+  bodyJson: unknown,
+  keywords: string[] | undefined,
+): boolean {
+  const normalizedKeywords = (keywords ?? [])
+    .map((keyword) => keyword.trim())
+    .filter(Boolean)
+  if (!normalizedKeywords.length) return false
+
+  const searchableBody = bodyText ?? (bodyJson == null ? '' : JSON.stringify(bodyJson))
+  return normalizedKeywords.some((keyword) => searchableBody.includes(keyword))
+}
+
 function shouldCapture(url: string, bodyText: string | undefined, bodyJson: unknown, config: DebugCaptureConfig): boolean {
   if (!config.captureEnabled) return false
 
   const normalizedUrl = url.toLowerCase()
   if (config.excludeEmbeddingRequests && isEmbeddingRequest(normalizedUrl, bodyJson)) return false
+  if (containsExcludedRequestBodyKeyword(bodyText, bodyJson, config.excludeRequestBodyKeywords)) return false
 
   const isMcpRequest = normalizedUrl.includes('/mcp')
   const isJsonRpcRequest = hasJsonRpcPayload(bodyJson)

@@ -4,6 +4,7 @@ export interface DebugCaptureConfig {
   capturePendingRequests: boolean
   captureNonChatRequests: boolean
   excludeEmbeddingRequests: boolean
+  excludeRequestBodyKeywords: string[]
   writeMarkdown: boolean
   renderImageOnCommand?: boolean
   collapseJsonOnRender: boolean

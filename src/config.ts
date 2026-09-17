@@ -26,6 +26,9 @@ export const Config: Schema<DebugCaptureConfig> = Schema.object({
   excludeEmbeddingRequests: Schema.boolean()
     .default(false)
     .description('是否排除 Embedding 请求日志；默认不排除，开启后跳过 /embeddings 端点或 embedding 模型请求'),
+  excludeRequestBodyKeywords: Schema.array(Schema.string())
+    .default([])
+    .description('请求体包含任一关键字时跳过日志落盘；使用区分大小写的完整稳定片段'),
   writeMarkdown: Schema.boolean()
     .default(true)
     .description('是否将日志写入 Markdown 文件'),

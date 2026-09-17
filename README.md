@@ -60,6 +60,7 @@ corepack yarn debug:html d:\code_base\koishi-app\data\chat-debug\2026-05-18\md\c
 | `maxPreviewChars` | `2000` | 文本预览的最大字符数 |
 | `redactHeaders` | `['authorization', 'cookie', 'x-api-key']` | 发送前做脱敏的请求头 |
 | `captureFilters` | `['/chat/completions', '/responses', 'messages', 'tools']` | 命中过滤词后才记录请求 |
+| `excludeRequestBodyKeywords` | `[]` | 请求体包含任一关键字时跳过日志落盘；按区分大小写的完整片段匹配 |
 | `mergeForwardBatchSize` | `5` | 图片模式下单批合并条数 |
 | `renderTimeoutMs` | `15000` | Puppeteer 渲染超时，单位毫秒 |
 | `imageMaxBytes` | `5242880` (`5 MiB`) | 单张预览图的最大字节数 |
