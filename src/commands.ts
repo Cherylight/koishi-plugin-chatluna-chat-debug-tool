@@ -11,7 +11,7 @@ import {
   type DebugLogRow,
 } from './storage'
 import { renderDebugPreview, renderDebugPreviewHtml } from './render-image'
-import { logger } from './logger'
+import { formatErrorForLog, logger } from './logger'
 import zhCN from './locales/zh-CN'
 import { cleanDebugLogs, deleteDebugLog } from './clean'
 
@@ -343,9 +343,10 @@ interface OneBotForwardSender {
 }
 
 function getOneBotForwardSender(session: Session): OneBotForwardSender | undefined {
-  const onebot = (session as any).onebot
-  if (!onebot) return undefined
-  return onebot as OneBotForwardSender
+  const internal = (session as any).bot?.internal
+  if (internal) return internal as OneBotForwardSender
+  const legacy = (session as any).onebot
+  return legacy as OneBotForwardSender | undefined
 }
 
 function getForwardTarget(session: Session) {
@@ -525,7 +526,7 @@ export function registerCommands(ctx: Context, config: DebugCaptureConfig, runti
           await sendHtmlFileForward(session, metadataText, htmlPath, generatedAt)
           return
         } catch (error) {
-          logger.warn('发送 HTML 调试文件失败，回退到 Markdown 文本预览:', error)
+          logger.warn(`发送 HTML 调试文件失败，回退到 Markdown 文本预览: logId=${entry.metadata.id}, ${formatErrorForLog(error)}`)
           return clipPreview(markdown, config.maxPreviewChars)
         }
       }

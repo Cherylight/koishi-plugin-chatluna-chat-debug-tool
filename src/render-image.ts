@@ -1,7 +1,7 @@
 import type { Context } from 'koishi'
 import type { DebugCaptureConfig, DebugEntry } from './types'
 import { renderDebugMarkdown } from './markdown'
-import { logger } from './logger'
+import { formatErrorForLog, logger } from './logger'
 import { buildDebugPreviewHtml } from './render-preview-template'
 
 export interface RenderResult {
@@ -146,13 +146,13 @@ export async function renderDebugPreview(
       mimeType: 'image/png',
     }
   } catch (error) {
-    logger.warn('预览截图失败，回退到 Markdown 文本预览:', error)
+    logger.warn(`预览截图失败，回退到 Markdown 文本预览: ${formatErrorForLog(error)}`)
     return { markdown }
   } finally {
     try {
       await page?.close()
     } catch (error) {
-      logger.debug('关闭 Puppeteer 页面失败:', error)
+      logger.debug(`关闭 Puppeteer 页面失败: ${formatErrorForLog(error)}`)
     }
   }
 }

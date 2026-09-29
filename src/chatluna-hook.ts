@@ -681,7 +681,7 @@ async function persistDebugEntry(
   const markdown = renderDebugMarkdown(rewrittenEntry)
   const row = await saveDebugEntry(ctx, rewrittenEntry, markdown, config.storageDir)
   if (logSavedPath) {
-    logger.info(`${hookMessage}, 日志已保存到${row.filePath}`)
+    logger.info(`${hookMessage}, 日志已保存到:${row.filePath}`)
   }
   return row
 }
