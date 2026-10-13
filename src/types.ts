@@ -13,6 +13,10 @@ export interface DebugCaptureConfig {
   storageDir: string
   maxPreviewChars: number
   redactHeaders: string[]
+  excludeJsonFields?: string[]
+  captureMaxBytes?: number
+  mergeTurns?: boolean
+  turnIdleTimeoutMs?: number
   captureFilters: string[]
   sendMode: 'image' | 'text' | 'html'
   mergeForwardBatchSize: number
@@ -45,6 +49,16 @@ export interface DebugMetadata {
   otherOptions?: unknown
   usage?: unknown
   error?: string
+  traceId?: string
+  turnId?: string
+  turnCreatedAt?: number
+  callRunId?: string
+  parentTraceId?: string
+  traceSource?: string
+  responseStatus?: string
+  responseErrorCode?: string
+  captureOutcome?: string
+  capturedBytes?: number
 }
 
 export interface DebugMessagePart {

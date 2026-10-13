@@ -160,7 +160,7 @@ export async function listDebugStorageFiles(ctx: Context, storageDir: string) {
   for (const dayEntry of dayEntries) {
     if (!dayEntry.isDirectory()) continue
     const dayDir = path.join(baseDir, dayEntry.name)
-    for (const category of ['md', 'json', 'html', 'files']) {
+    for (const category of ['md', 'json', 'html', 'files', 'turns']) {
       await walkFiles(path.join(dayDir, category), files)
     }
   }

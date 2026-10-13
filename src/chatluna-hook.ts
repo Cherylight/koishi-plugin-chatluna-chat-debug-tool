@@ -2,14 +2,20 @@
 import { ChatLunaPlugin } from 'koishi-plugin-chatluna/services/chat'
 import { logger } from './logger'
 import type { DebugCaptureConfig, DebugEntry, DebugMessagePart, DebugToolCall, DebugToolDefinition, DebugToolResult } from './types'
-import { DEBUG_LOG_TABLE, removeDebugFiles, rewriteDebugEntryAssets, saveDebugEntry, type DebugLogRow } from './storage'
+import { DEBUG_LOG_TABLE, ensureMarkdownPath, removeDebugFiles, rewriteDebugEntryAssets, saveDebugEntry, type DebugLogRow } from './storage'
 import { renderDebugMarkdown } from './markdown'
+import { parseSseFrames, aggregateResponsesSsePayload, extractResponsesReasoningText } from './responses-capture'
+import { sanitizeDebugEntry } from './debug-redaction'
+import { tapResponseBody } from './stream-tap'
+import { currentDebugTrace, installTraceContext } from './trace-context'
+import { TurnAggregator } from './turn-aggregation'
+import { createTurnWriter } from './turn-storage'
 
 const originalFetchMap = new WeakMap<object, Function>()
 
 export interface HookInstallResult {
   installed: boolean
-  uninstall: () => void
+  uninstall: () => void | Promise<void>
 }
 
 function resolveFetchTarget(_plugin: any): { target?: object; fetch?: Function; mode: 'class-prototype' | 'instance' | 'prototype' | 'missing'; depth?: number } {
@@ -167,6 +173,8 @@ function extractStructuredRequest(body: any): { messages: DebugMessagePart[]; to
 
 function extractReasoningText(content: unknown): string {
   if (typeof content === 'string') return content
+  const responsesReasoning = extractResponsesReasoningText(content)
+  if (responsesReasoning) return responsesReasoning
   if (Array.isArray(content)) {
     return content.map((part) => {
       if (typeof part === 'string') return ''
@@ -187,6 +195,8 @@ function extractReasoningText(content: unknown): string {
 }
 
 function extractReasoningTextFromContent(content: unknown): string {
+  const responsesReasoning = extractResponsesReasoningText(content)
+  if (responsesReasoning) return responsesReasoning
   if (Array.isArray(content)) {
     return content.map((part) => {
       if (typeof part === 'string') return ''
@@ -225,13 +235,17 @@ function extractStructuredResponse(json: any): { messages: DebugMessagePart[]; t
 
   if (Array.isArray(json.output)) {
     for (const item of json.output) {
-      if (item?.type === 'message') {
+      if (item?.type === 'reasoning') {
+        appendReasoningFragment(reasoningFragments, item)
+      } else if (item?.type === 'message') {
         appendReasoningFragment(reasoningFragments, item?.reasoning)
         appendReasoningFragment(reasoningFragments, item?.reasoning_content)
         appendReasoningContentFragment(reasoningFragments, item?.content)
         messages.push({
           role: ['system', 'user', 'assistant', 'tool'].includes(item?.role) ? item.role : 'assistant',
-          content: normalizeContent(item?.content),
+          content: normalizeContent(Array.isArray(item?.content)
+            ? item.content.map((part: any) => part?.type === 'refusal' && typeof part.refusal === 'string' ? { type: 'text', text: part.refusal } : part)
+            : item?.content),
         })
       } else if (item?.type === 'function_call') {
         toolCalls.push({
@@ -437,6 +451,8 @@ function appendSseChoiceReasoning(target: Map<number, string[]>, index: number, 
 }
 
 function aggregateSsePayload(rawText: string, knownToolNames?: Set<string>): { text: string; reasoningText: string; json?: unknown; parsed: boolean } {
+  const responses = aggregateResponsesSsePayload(rawText)
+  if (responses.parsed) return responses
   const outputTextFragments: string[] = []
   const outputReasoningFragments: string[] = []
   const choiceTexts = new Map<number, string[]>()
@@ -446,14 +462,17 @@ function aggregateSsePayload(rawText: string, knownToolNames?: Set<string>): { t
   let model: string | undefined
   let usage: unknown
   let parsed = false
-  const lines = rawText.split(/\r?\n/)
-
-  for (const line of lines) {
-    if (!line.startsWith('data:')) continue
-    const payload = line.slice(5).trim()
+  for (const frame of parseSseFrames(rawText)) {
+    const payload = frame.data.trim()
     if (!payload || payload === '[DONE]') continue
     const payloadJson = tryParseJson(payload) as any
     if (!payloadJson || typeof payloadJson !== 'object') continue
+    const knownPayload = Array.isArray(payloadJson.choices)
+      || typeof payloadJson.output_text === 'string'
+      || Array.isArray(payloadJson.output)
+      || payloadJson.object === 'chat.completion.chunk'
+      || payloadJson.object === 'chat.completion'
+    if (!knownPayload) continue
 
     parsed = true
 
@@ -567,9 +586,12 @@ function aggregateSsePayload(rawText: string, knownToolNames?: Set<string>): { t
 }
 
 async function readResponseBody(response: Response, knownToolNames?: Set<string>): Promise<{ text: string; reasoningText?: string; json?: unknown; bytes: number; truncated: boolean }> {
-  const clone = response.clone()
-  const contentType = clone.headers.get('content-type') || ''
-  const rawText = await clone.text()
+  const contentType = response.headers.get('content-type') || ''
+  const rawText = await response.text()
+  return parseCapturedResponseBody(rawText, contentType, knownToolNames)
+}
+
+function parseCapturedResponseBody(rawText: string, contentType: string, knownToolNames?: Set<string>): { text: string; reasoningText?: string; json?: unknown; bytes: number; truncated: boolean } {
 
   if (contentType.includes('text/event-stream')) {
     const aggregated = aggregateSsePayload(rawText, knownToolNames)
@@ -578,7 +600,7 @@ async function readResponseBody(response: Response, knownToolNames?: Set<string>
       text,
       reasoningText: aggregated.reasoningText || undefined,
       json: aggregated.json,
-      bytes: Buffer.byteLength(text),
+      bytes: Buffer.byteLength(rawText),
       truncated: false,
     }
   }
@@ -676,12 +698,28 @@ async function persistDebugEntry(
   entry: DebugEntry,
   hookMessage: string,
   logSavedPath: boolean,
+  aggregator?: TurnAggregator,
+  writeTurn?: ReturnType<typeof createTurnWriter>,
 ) {
-  const rewrittenEntry = await rewriteDebugEntryAssets(ctx, config.storageDir, entry)
+  const safeEntry = sanitizeDebugEntry(entry, config.excludeJsonFields)
+  const rewrittenEntry = await rewriteDebugEntryAssets(ctx, config.storageDir, safeEntry)
+  let turn: ReturnType<TurnAggregator['ingest']> | undefined
+  if (aggregator) {
+    try {
+      turn = aggregator.ingest(rewrittenEntry, ensureMarkdownPath(ctx, config.storageDir, entry.metadata.id, entry.metadata.createdAt))
+      rewrittenEntry.metadata.turnId = turn.id
+      rewrittenEntry.metadata.turnCreatedAt = turn.createdAt
+    } catch (error) { logger.warn('合并调试日志关联失败（继续保存单次日志）:', error) }
+  }
   const markdown = renderDebugMarkdown(rewrittenEntry)
   const row = await saveDebugEntry(ctx, rewrittenEntry, markdown, config.storageDir)
+  if (turn && writeTurn) {
+    try { await writeTurn(turn) } catch (error) {
+      logger.warn('保存合并调试日志失败（单次日志已保留）:', error)
+    }
+  }
   if (logSavedPath) {
-    logger.info(`${hookMessage}, 日志已保存到:${row.filePath}`)
+    logger.info(`${hookMessage}, 日志已保存到"${row.filePath}"`)
   }
   return row
 }
@@ -740,9 +778,31 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
 
   const originalFetch = resolved.fetch
   originalFetchMap.set(resolved.target, originalFetch)
+  const uninstallTrace = installTraceContext(ctx)
+  const writeTurn = createTurnWriter(ctx, config)
+  const aggregator = config.mergeTurns === false ? undefined : new TurnAggregator({
+    idleTimeoutMs: config.turnIdleTimeoutMs ?? 30000,
+    onFlush: view => { void writeTurn(view).catch(error => logger.warn('保存合并调试日志失败:', error)) },
+  })
+  const stopExpiry = aggregator && typeof ctx.setInterval === 'function'
+    ? ctx.setInterval(() => {
+        for (const id of uninstallTrace.activeTraceIds()) aggregator.touch(id)
+        aggregator.flushExpired()
+      }, 10000) : undefined
+  const stopInvalidation = typeof ctx.on === 'function' ? (ctx as any).on('chat-debug/turn-invalidated', async (ids: string[]) => {
+    const active = ids.filter(id => aggregator?.forget(id) || writeTurn.hasPending(id))
+    await writeTurn.invalidate(active)
+  }) : undefined
 
   ;(resolved.target as any).fetch = async function fetchWithDebug(info: RequestInfo, init?: RequestInit, proxy?: string) {
     const startedAt = Date.now()
+    const trace = currentDebugTrace()
+    const traceMetadata = trace ? {
+      traceId: trace.traceSource === 'character' ? trace.traceId : undefined,
+      traceSource: trace.traceSource,
+      callRunId: trace.callRunId,
+      parentTraceId: trace.parentTraceId,
+    } : {}
     const normalizedRequest = await normalizeRequest(info, init)
     const requestHeaders = redactHeaders(normalizedRequest.requestHeaders, config.redactHeaders)
     const requestBody = normalizedRequest.requestBody
@@ -780,6 +840,8 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
       return {
         metadata: {
           id,
+          ...traceMetadata,
+          captureOutcome: errorMessage ? 'failed' : 'pending',
           createdAt: startedAt,
           endAt: errorMessage ? completedAt : undefined,
           durationMs: completedAt - startedAt,
@@ -811,7 +873,7 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
     const capturePendingRequests = Boolean(config.capturePendingRequests)
     let pendingSavePromise: Promise<DebugLogRow | undefined> | undefined
     if (config.writeMarkdown && capturePendingRequests) {
-      pendingSavePromise = persistDebugEntry(ctx, config, createRequestOnlyEntry(), hookMessage, false)
+      pendingSavePromise = persistDebugEntry(ctx, config, createRequestOnlyEntry(), hookMessage, false, aggregator, writeTurn)
         .catch((error) => {
           logger.warn('保存请求调试日志失败:', error)
           return undefined
@@ -824,15 +886,33 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
       const responseHeaders = redactHeaders(Object.fromEntries(response.headers.entries()), config.redactHeaders)
 
       if (config.writeMarkdown) {
-        void readResponseBody(response, new Set(tools.map((tool) => tool.name).filter(Boolean)))
-          .then(async (responseBody) => {
+        return tapResponseBody(response, async (capture) => {
+            const responseBody = parseCapturedResponseBody(capture.rawText, response.headers.get('content-type') || '', new Set(tools.map((tool) => tool.name).filter(Boolean)))
             const structuredResponse = extractStructuredResponse(responseBody.json)
+            const json = responseBody.json as any
+            const errorCode = typeof json?.error?.code === 'string' ? json.error.code : undefined
+            const upstreamFailed = errorCode && errorCode !== 'debug_stream_incomplete'
+            const responseStatus = typeof json?.status === 'string' ? json.status : undefined
+            const captureOutcome = capture.truncated ? 'truncated'
+              : upstreamFailed || responseStatus === 'failed' ? 'failed'
+                : responseStatus === 'completed' ? 'complete'
+                  : capture.outcome !== 'complete' ? capture.outcome
+                    : responseStatus === 'incomplete' || responseStatus === 'in_progress' ? 'incomplete' : 'complete'
+            const responseError = upstreamFailed ? JSON.stringify(json.error)
+              : capture.error ? formatErrorMessage(capture.error)
+                : captureOutcome === 'incomplete' ? 'Responses stream ended without a terminal event.' : undefined
             const requestId = pickHeader(responseHeaders, ['x-request-id', 'request-id'])
             const serverRequestId = pickHeader(responseHeaders, ['x-ms-request-id', 'trace-id', 'x-trace-id']) || requestId
             const completedAt = Date.now()
             const entry: DebugEntry = {
               metadata: {
                 id,
+                ...traceMetadata,
+                responseStatus,
+                responseErrorCode: capture.truncated ? undefined : errorCode,
+                captureOutcome,
+                capturedBytes: capture.capturedBytes,
+                error: responseError,
                 createdAt: startedAt,
                 endAt: completedAt,
                 durationMs: completedAt - startedAt,
@@ -846,9 +926,9 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
                 requestId,
                 serverRequestId,
                 responseId: structuredResponse.responseId,
-                truncated: responseBody.truncated,
+                truncated: capture.truncated,
                 requestBytes: requestBody.text ? Buffer.byteLength(requestBody.text) : undefined,
-                responseBytes: responseBody.bytes,
+                responseBytes: capture.bytes,
                 maxTokens: (requestBody.json as any)?.max_tokens,
                 maxOutputTokens: (requestBody.json as any)?.max_output_tokens,
                 reasoning: (requestBody.json as any)?.reasoning,
@@ -871,9 +951,8 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
 
             const pendingRow = pendingSavePromise ? await pendingSavePromise : undefined
             await removeSavedDebugEntry(ctx, pendingRow)
-            return persistDebugEntry(ctx, config, entry, hookMessage, true)
-          })
-          .catch(async (error) => {
+            await persistDebugEntry(ctx, config, entry, hookMessage, true, aggregator, writeTurn)
+          }, config.captureMaxBytes ?? 8 * 1024 * 1024, async (error) => {
             if (isAbortError(error)) {
               logger.debug(capturePendingRequests
                 ? '调试日志响应体读取被上游取消，保留请求日志'
@@ -890,7 +969,7 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
 
             try {
               if (pendingSavePromise) await pendingSavePromise
-              await persistDebugEntry(ctx, config, createRequestOnlyEntry(error), hookMessage, true)
+              await persistDebugEntry(ctx, config, createRequestOnlyEntry(error), hookMessage, true, aggregator, writeTurn)
             } catch (saveError) {
               logger.warn('更新请求调试日志失败:', saveError)
             }
@@ -902,7 +981,7 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
       if (config.writeMarkdown) {
         void (async () => {
           if (pendingSavePromise) await pendingSavePromise
-          return persistDebugEntry(ctx, config, createRequestOnlyEntry(error), hookMessage, true)
+          return persistDebugEntry(ctx, config, createRequestOnlyEntry(error), hookMessage, true, aggregator, writeTurn)
         })()
           .catch((saveError) => {
             logger.warn('保存失败请求日志失败:', saveError)
@@ -916,9 +995,15 @@ export function installChatlunaDebugHook(ctx: Context, config: DebugCaptureConfi
   return {
     installed: true,
     uninstall: () => {
+      stopExpiry?.()
+      aggregator?.dispose()
+      writeTurn.close()
+      stopInvalidation?.()
+      uninstallTrace()
       ;(resolved.target as any).fetch = originalFetch
       if (resolved.target) originalFetchMap.delete(resolved.target)
       logger.info('ChatLuna 调试 hook 已卸载')
+      return writeTurn.drain()
     },
   }
 }

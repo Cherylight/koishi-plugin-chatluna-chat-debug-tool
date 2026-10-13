@@ -5,6 +5,7 @@ import { h, type Context, type Session } from 'koishi'
 import type { DebugCaptureConfig, DebugEntry } from './types'
 import {
   DEBUG_LOG_TABLE,
+  buildSummary,
   readDebugEntry,
   readMarkdownFile,
   writeHtmlFile,
@@ -14,6 +15,9 @@ import { renderDebugPreview, renderDebugPreviewHtml } from './render-image'
 import { formatErrorForLog, logger } from './logger'
 import zhCN from './locales/zh-CN'
 import { cleanDebugLogs, deleteDebugLog } from './clean'
+import { sanitizeDebugEntry, sanitizeDebugText } from './debug-redaction'
+import { turnFilePath } from './turn-storage'
+import { buildDebugPreviewHtml } from './render-preview-template'
 
 export interface DebugRuntimeController {
   isHookInstalled(): boolean
@@ -164,7 +168,7 @@ function formatEntryOverview(entry: DebugEntry, row: Pick<DebugLogRow, 'filePath
     markdownPath ? `Markdown: ${markdownPath}` : undefined,
     jsonPath ? `JSON: ${jsonPath}` : undefined,
     htmlPath ? `HTML: ${htmlPath}` : undefined,
-    `摘要: ${row.summary}`,
+    `摘要: ${buildSummary(entry)}`,
   ].filter(Boolean)
   return lines.join('\n')
 }
@@ -208,18 +212,18 @@ function buildFallbackEntry(row: any, markdown: string): DebugEntry {
   }
 }
 
-async function loadEntry(row: any) {
+async function loadEntry(row: any, config?: Partial<DebugCaptureConfig>) {
   const typedRow = row as DebugLogRow
   if (typedRow.jsonPath) {
     try {
-      return await readDebugEntry(typedRow.jsonPath)
+      return sanitizeDebugEntry(await readDebugEntry(typedRow.jsonPath), config?.excludeJsonFields)
     } catch (error) {
       logger.warn(`读取结构化调试日志失败: ${typedRow.jsonPath}`, error)
     }
   }
 
   const markdown = await readMarkdownFile(typedRow.filePath)
-  return buildFallbackEntry(typedRow, markdown)
+  return sanitizeDebugEntry(buildFallbackEntry(typedRow, markdown), config?.excludeJsonFields)
 }
 
 interface LocalAssetsLike {
@@ -479,11 +483,33 @@ export function registerCommands(ctx: Context, config: DebugCaptureConfig, runti
       return lines.join('\n')
     })
 
+  command.subcommand('.turn <id:text>', '查看整轮合并日志，输入任一单次日志 ID；以 HTML 文件发送')
+    .action(async ({ session }, id) => {
+      const row = await findRow(ctx, id?.startsWith('turn-') ? id.slice(5) : id)
+      if (!row) return text(session, 'commands.chat-debug.messages.not-found')
+      const turnId = row.turnId || (id?.startsWith('turn-') ? id : undefined)
+      if (!turnId) return '这条日志尚无合并记录；新请求在开启整轮合并后会自动生成。'
+      const first = await findRow(ctx, turnId.slice(5))
+      if (!first) return '合并记录的首条索引已不存在，请在日志目录查看 turns 文件。'
+      const file = turnFilePath(ctx, config.storageDir, turnId, first.createdAt)
+      try {
+        const markdown = sanitizeDebugText(await readMarkdownFile(file), config.excludeJsonFields)
+        if (!session || normalizeSendMode(config) === 'text') return clipPreview(markdown, config.maxPreviewChars)
+        const html = buildDebugPreviewHtml(markdown, { titleSuffix: turnId, sourcePath: file,
+          collapseJsonByDefault: true, collapseSystemPromptByDefault: true })
+        const htmlPath = await writeHtmlFile(ctx, config.storageDir, turnId, first.createdAt, html)
+        await sendHtmlFileForward(session, `整轮合并日志：${turnId}`, htmlPath, Date.now())
+      } catch (error) {
+        logger.warn('读取或发送合并调试日志失败:', error)
+        return '合并日志暂不可用，可先查看该调用的单次日志。'
+      }
+    })
+
   command.subcommand('.show <id:text>', text(undefined, 'commands.chat-debug.show.description'))
     .action(async ({ session }, id) => {
       const row = await findRow(ctx, id)
       if (!row) return text(session, 'commands.chat-debug.messages.not-found')
-      const entry = await loadEntry(row)
+      const entry = await loadEntry(row, config)
       return formatEntryOverview(entry, row)
     })
 
@@ -493,7 +519,7 @@ export function registerCommands(ctx: Context, config: DebugCaptureConfig, runti
       const row = await findRow(ctx, id)
       if (!row) return text(session, 'commands.chat-debug.messages.not-found')
       const filePath = row.filePath as string
-      const markdown = await readMarkdownFile(filePath)
+      const markdown = sanitizeDebugText(await readMarkdownFile(filePath), config.excludeJsonFields)
       const previewText = clipPreview(markdown, config.maxPreviewChars)
       if (normalizeSendMode(config) === 'text') return previewText
       return sendPreview(session, previewText)
@@ -504,7 +530,7 @@ export function registerCommands(ctx: Context, config: DebugCaptureConfig, runti
       if (!session) return
       const row = await findRow(ctx, id)
       if (!row) return text(session, 'commands.chat-debug.messages.not-found')
-      const entry = await loadEntry(row)
+      const entry = await loadEntry(row, config)
       const mode = normalizeSendMode(config)
       if (mode === 'text') {
         const { markdown } = renderDebugPreviewHtml(entry, config, {

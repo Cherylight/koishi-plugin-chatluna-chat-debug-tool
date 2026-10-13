@@ -1,6 +1,7 @@
 import path from 'node:path'
+import { promises as fs } from 'node:fs'
 import type { Context } from 'koishi'
-import type { DebugCaptureConfig } from './types'
+import type { DebugCaptureConfig, DebugEntry } from './types'
 import {
   DEBUG_LOG_TABLE,
   listDebugStorageFiles,
@@ -36,6 +37,7 @@ export interface DeleteDebugLogResult {
   removedFiles: number
   missingFiles: number
   failures: DebugDeleteFailure[]
+  invalidatedTurnIds: string[]
 }
 
 export interface CleanDebugLogsResult {
@@ -47,6 +49,14 @@ export interface CleanDebugLogsResult {
   missingIndexedFiles: number
   prunedDirectories: number
   failures: DebugDeleteFailure[]
+  invalidatedTurnIds: string[]
+}
+
+interface DerivedTurnFiles {
+  id: string
+  paths: string[]
+  jsonPath: string
+  memberIds?: string[]
 }
 
 function isMissingFileError(error: unknown) {
@@ -64,25 +74,104 @@ function inferHtmlPath(row: Pick<DebugLogRow, 'filePath' | 'htmlPath'>) {
   return path.join(dayDir, 'html', `${stem}.html`)
 }
 
-async function collectDeletePaths(row: DebugLogRow) {
+function derivedTurnPaths(dayDir: string, id: string) {
+  return [
+    path.join(dayDir, 'turns', `${id}.md`),
+    path.join(dayDir, 'turns', `${id}.json`),
+    path.join(dayDir, 'html', `chat-debug-${id}.html`),
+  ]
+}
+
+async function collectDerivedTurns(scannedFiles: string[]) {
+  const groups = new Map<string, DerivedTurnFiles>()
+  for (const filePath of scannedFiles) {
+    const category = path.basename(path.dirname(filePath))
+    const name = path.basename(filePath)
+    const match = category === 'turns'
+      ? name.match(/^(turn-[a-zA-Z0-9_-]+)\.(?:md|json)(?:\.tmp)?$/)
+      : category === 'html' ? name.match(/^chat-debug-(turn-[a-zA-Z0-9_-]+)\.html$/) : null
+    if (!match) continue
+    const id = match[1]
+    const dayDir = path.dirname(path.dirname(filePath))
+    const key = `${normalizeDebugFilePath(dayDir)}:${id}`
+    const group = groups.get(key) ?? {
+      id, paths: derivedTurnPaths(dayDir, id), jsonPath: path.join(dayDir, 'turns', `${id}.json`),
+    }
+    if (!group.paths.includes(filePath)) group.paths.push(filePath)
+    groups.set(key, group)
+  }
+  for (const group of groups.values()) {
+    try {
+      const view = JSON.parse(await fs.readFile(group.jsonPath, 'utf8'))
+      if (view.id === group.id && Array.isArray(view.requests) && view.requests.length
+        && view.requests.every((request: any) => typeof request?.id === 'string' && request.id)) {
+        group.memberIds = Array.from(new Set(view.requests.map((request: any) => request.id))) as string[]
+      }
+    } catch (error) {
+      if (!isMissingFileError(error)) {
+        await warnClean(`读取合并调试日志成员失败: ${group.id}`,
+          error instanceof SyntaxError ? new Error('Invalid merged debug member index') : error)
+      }
+    }
+  }
+  return Array.from(groups.values())
+}
+
+function rowStorageDir(ctx: Context, row: DebugLogRow) {
+  const primaryPath = row.filePath || row.jsonPath || row.htmlPath
+  if (!primaryPath) return undefined
+  const categoryDir = path.dirname(primaryPath)
+  if (!['md', 'json', 'html'].includes(path.basename(categoryDir))) return undefined
+  const storageBase = path.dirname(path.dirname(categoryDir))
+  const relative = path.relative(path.join(ctx.baseDir, 'data'), storageBase)
+  if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) return undefined
+  return relative
+}
+
+async function invalidateTurns(ctx: Context, ids: string[]) {
+  // Runtime listeners invalidate in-memory turns and drain pending writers
+  // before their derived files are removed, preventing later resurrection.
+  if (ids.length && typeof (ctx as any).parallel === 'function') {
+    await (ctx as any).parallel('chat-debug/turn-invalidated', ids)
+  }
+}
+
+async function collectDeletePaths(row: DebugLogRow, groups: DerivedTurnFiles[]) {
   const paths = [
     row.filePath,
     row.jsonPath,
     inferHtmlPath(row),
   ]
-
-  if (!row.jsonPath) return paths
-
-  try {
-    const entry = await readDebugEntry(row.jsonPath)
-    paths.push(...(entry.assetFiles?.map((asset) => asset.filePath) ?? []))
-  } catch (error) {
-    if (!isMissingFileError(error)) {
-      await warnClean(`读取待删除调试日志失败: ${row.id}`, error)
+  let entry: DebugEntry | undefined
+  if (row.jsonPath) {
+    try {
+      entry = await readDebugEntry(row.jsonPath)
+      paths.push(...(entry.assetFiles?.map((asset) => asset.filePath) ?? []))
+    } catch (error) {
+      if (!isMissingFileError(error)) {
+        await warnClean(`读取待删除调试日志失败: ${row.id}`, error)
+      }
     }
   }
-
-  return paths
+  const turnId = row.turnId || entry?.metadata.turnId
+  const turnCreatedAt = row.turnCreatedAt ?? entry?.metadata.turnCreatedAt
+  const turnIds = new Set<string>()
+  if (turnId && /^turn-[a-zA-Z0-9_-]+$/.test(turnId)) {
+    turnIds.add(turnId)
+    const primaryPath = row.filePath || row.jsonPath || row.htmlPath
+    if (primaryPath && turnCreatedAt != null && Number.isFinite(new Date(turnCreatedAt).getTime())) {
+      const storageBase = path.dirname(path.dirname(path.dirname(primaryPath)))
+      const dayDir = path.join(storageBase, new Date(turnCreatedAt).toISOString().slice(0, 10))
+      paths.push(...derivedTurnPaths(dayDir, turnId))
+    }
+  }
+  for (const group of groups) {
+    if (group.id === turnId || group.id === `turn-${row.id}` || group.memberIds?.includes(row.id)) {
+      paths.push(...group.paths)
+      turnIds.add(group.id)
+    }
+  }
+  return { paths, turnIds: Array.from(turnIds) }
 }
 
 function addPath(pathSet: Set<string>, filePath?: string) {
@@ -118,7 +207,7 @@ function collectInferredAssetPaths(row: DebugLogRow, scannedFiles: string[]) {
   })
 }
 
-async function collectRetainedPathSet(rows: DebugLogRow[], scannedFiles: string[]) {
+async function collectRetainedPathSet(rows: DebugLogRow[], scannedFiles: string[], groups: DerivedTurnFiles[]) {
   const retainedPaths = new Set<string>()
 
   for (const row of rows) {
@@ -144,11 +233,23 @@ async function collectRetainedPathSet(rows: DebugLogRow[], scannedFiles: string[
     }
   }
 
+  const retainedIds = new Set(rows.map(row => row.id))
+  for (const group of groups) {
+    if (group.memberIds?.length && group.memberIds.every(id => retainedIds.has(id))) {
+      for (const filePath of group.paths) addPath(retainedPaths, filePath)
+    }
+  }
+
   return retainedPaths
 }
 
 async function deleteDebugLogNow(ctx: Context, row: DebugLogRow): Promise<DeleteDebugLogResult> {
-  const removeResult = await removeDebugFiles(await collectDeletePaths(row))
+  const storageDir = rowStorageDir(ctx, row)
+  const scannedFiles = storageDir == null ? [] : await listDebugStorageFiles(ctx, storageDir)
+  const groups = await collectDerivedTurns(scannedFiles)
+  const deletion = await collectDeletePaths(row, groups)
+  await invalidateTurns(ctx, deletion.turnIds)
+  const removeResult = await removeDebugFiles(deletion.paths)
 
   if (!removeResult.failures.length) {
     await (ctx.database as any).remove(DEBUG_LOG_TABLE, { id: row.id } as any)
@@ -159,6 +260,7 @@ async function deleteDebugLogNow(ctx: Context, row: DebugLogRow): Promise<Delete
     removedFiles: removeResult.removed,
     missingFiles: removeResult.missing,
     failures: removeResult.failures,
+    invalidatedTurnIds: deletion.turnIds,
   }
 }
 
@@ -179,17 +281,29 @@ async function cleanDebugLogsNow(ctx: Context, config: DebugCaptureConfig, keep:
   const retainedRows = rows.slice(0, safeKeep) as DebugLogRow[]
   const obsoleteRows = rows.slice(safeKeep) as DebugLogRow[]
   const scannedFiles = await listDebugStorageFiles(ctx, config.storageDir)
-  const retainedPathSet = await collectRetainedPathSet(retainedRows, scannedFiles)
+  const groups = await collectDerivedTurns(scannedFiles)
+  const retainedPathSet = await collectRetainedPathSet(retainedRows, scannedFiles, groups)
   const indexedDeletePathSet = new Set<string>()
+  const deletions = []
+  const invalidatedTurnIds = new Set<string>()
+  for (const row of obsoleteRows) {
+    const deletion = await collectDeletePaths(row, groups)
+    deletions.push({ row, ...deletion })
+    for (const filePath of deletion.paths) addPath(indexedDeletePathSet, filePath)
+    for (const id of deletion.turnIds) invalidatedTurnIds.add(id)
+  }
+  for (const group of groups) {
+    if (group.paths.some(filePath => !retainedPathSet.has(normalizeDebugFilePath(filePath)))) {
+      invalidatedTurnIds.add(group.id)
+    }
+  }
+  await invalidateTurns(ctx, Array.from(invalidatedTurnIds))
 
   let indexedRowsCleaned = 0
   let removedIndexedFiles = 0
   let missingIndexedFiles = 0
 
-  for (const row of obsoleteRows) {
-    const deletePaths = await collectDeletePaths(row)
-    for (const filePath of deletePaths) addPath(indexedDeletePathSet, filePath)
-
+  for (const { row, paths: deletePaths } of deletions) {
     const removeResult = await removeDebugFiles(deletePaths)
     removedIndexedFiles += removeResult.removed
     missingIndexedFiles += removeResult.missing
@@ -221,6 +335,7 @@ async function cleanDebugLogsNow(ctx: Context, config: DebugCaptureConfig, keep:
     missingIndexedFiles,
     prunedDirectories,
     failures,
+    invalidatedTurnIds: Array.from(invalidatedTurnIds),
   }
 }
 

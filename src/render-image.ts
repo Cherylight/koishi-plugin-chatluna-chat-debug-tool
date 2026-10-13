@@ -3,6 +3,7 @@ import type { DebugCaptureConfig, DebugEntry } from './types'
 import { renderDebugMarkdown } from './markdown'
 import { formatErrorForLog, logger } from './logger'
 import { buildDebugPreviewHtml } from './render-preview-template'
+import { sanitizeDebugEntry } from './debug-redaction'
 
 export interface RenderResult {
   markdown: string
@@ -42,7 +43,7 @@ export function renderDebugPreviewHtml(
   config?: Partial<DebugCaptureConfig>,
   previewOptions: RenderPreviewOptions = {},
 ) {
-  const markdown = renderDebugMarkdown(entry)
+  const markdown = renderDebugMarkdown(sanitizeDebugEntry(entry, config?.excludeJsonFields))
   const html = buildDebugPreviewHtml(markdown, {
     sourcePath: previewOptions.sourcePath,
     titleSuffix: '请求 / 响应',
@@ -51,6 +52,7 @@ export function renderDebugPreviewHtml(
     collapseSystemPromptByDefault: config?.collapseSystemPromptOnRender ?? false,
     stripCollapsedSystemPrompt: previewOptions.stripCollapsedSystemPrompt ?? false,
     embedChatImages: config?.embedChatImagesOnRender ?? false,
+    excludeJsonFields: config?.excludeJsonFields,
   })
 
   return { markdown, html }

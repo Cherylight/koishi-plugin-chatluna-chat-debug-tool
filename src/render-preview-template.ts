@@ -1,6 +1,7 @@
 ﻿import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { debugPreviewStyles } from './render-preview-style'
+import { sanitizeDebugText } from './debug-redaction'
 
 interface HeadingBlock {
   type: 'h1' | 'h2' | 'h3'
@@ -39,6 +40,7 @@ interface MetadataBlock {
 type MarkdownBlock = HeadingBlock | ListBlock | FenceBlock | ParagraphBlock | MetadataBlock
 
 export interface BuildDebugPreviewHtmlOptions {
+  excludeJsonFields?: string[]
   sourcePath?: string
   collapseJsonByDefault?: boolean
   collapseSystemPromptByDefault?: boolean
@@ -596,7 +598,7 @@ function renderBlocks(blocks: MarkdownBlock[], options: BuildDebugPreviewHtmlOpt
 }
 
 export function buildDebugPreviewHtml(markdown: string, options: BuildDebugPreviewHtmlOptions = {}) {
-  const blocks = parseMarkdownBlocks(markdown)
+  const blocks = parseMarkdownBlocks(sanitizeDebugText(markdown, options.excludeJsonFields))
   assignHeadingIds(blocks)
   resolveListAnchors(blocks)
   const htmlBody = renderBlocks(blocks, options)

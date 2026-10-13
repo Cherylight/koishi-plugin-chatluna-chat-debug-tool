@@ -1,7 +1,8 @@
 import type { DebugEntry, DebugMessagePart } from './types'
 
 function normalizeContent(input: string): string {
-  return input.replace(/\r\n/g, '\n')
+  return input.replace(/\r\n/g, '\n').replace(/[\u200B\u200E\u200F\u202A-\u202E\u2066-\u2069]/g,
+    char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)
 }
 
 function maxFenceRun(input: string, fenceChar: '`' | '~') {
@@ -86,11 +87,18 @@ export function renderDebugMarkdown(entry: DebugEntry): string {
     formatMetadataLine('serverRequestId', metadata.serverRequestId),
     formatMetadataLine('responseId', metadata.responseId),
     formatMetadataLine('status', metadata.status),
+    formatMetadataLine('responseStatus', metadata.responseStatus),
+    formatMetadataLine('captureOutcome', metadata.captureOutcome),
+    formatMetadataLine('responseErrorCode', metadata.responseErrorCode),
+    formatMetadataLine('traceId', metadata.traceId),
+    formatMetadataLine('turnId', metadata.turnId),
+    formatMetadataLine('callRunId', metadata.callRunId),
     formatMetadataLine('method', metadata.method),
     formatMetadataLine('url', metadata.url),
     formatMetadataLine('usage', metadata.usage),
     formatMetadataLine('requestBytes', metadata.requestBytes),
     formatMetadataLine('responseBytes', metadata.responseBytes),
+    formatMetadataLine('capturedBytes', metadata.capturedBytes),
     formatMetadataLine('truncated', metadata.truncated),
     formatMetadataLine('error', metadata.error),
   ]
@@ -144,6 +152,9 @@ export function renderDebugMarkdown(entry: DebugEntry): string {
     '### Headers',
     responseHeaders,
     '',
+    '### Response JSON',
+    responseJson,
+    '',
     '### Messages',
     responseMessages,
     '',
@@ -152,9 +163,6 @@ export function renderDebugMarkdown(entry: DebugEntry): string {
     '',
     '### Tool Results',
     toolResults,
-    '',
-    '### Response JSON',
-    responseJson,
     '',
     '### Response Reasoning',
     responseReasoning,

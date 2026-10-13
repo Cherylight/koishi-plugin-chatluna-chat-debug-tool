@@ -32,6 +32,14 @@ export const Config: Schema<DebugCaptureConfig> = Schema.object({
   writeMarkdown: Schema.boolean()
     .default(true)
     .description('是否将日志写入 Markdown 文件'),
+  captureMaxBytes: Schema.number().min(65536).max(64 * 1024 * 1024).step(65536)
+    .default(8 * 1024 * 1024)
+    .description('每次响应最多保留的调试字节数；超限明确标记截断，不截断实际模型传输'),
+  mergeTurns: Schema.boolean().default(true)
+    .description('为同一回答的各次请求生成去重的合并阅读日志；保留原有单次日志'),
+  turnIdleTimeoutMs: Schema.number().min(1000).max(30 * 60 * 1000).step(1000)
+    .default(30000)
+    .description('合并日志等待后续调用的空闲时间；未完成请求单独保留更长的等待时间'),
   sendMode: Schema.union([
     Schema.const('text').description('文本预览'),
     Schema.const('image').description('图片'),
@@ -57,6 +65,9 @@ export const Config: Schema<DebugCaptureConfig> = Schema.object({
   redactHeaders: Schema.array(Schema.string())
     .default(['authorization', 'cookie', 'x-api-key'])
     .description('需要脱敏的请求头'),
+  excludeJsonFields: Schema.array(Schema.string())
+    .default(['encrypted_content'])
+    .description('日志与预览中递归排除的 JSON 字段名；encrypted_content 始终排除，不影响实际 API 传输'),
   captureFilters: CaptureFilters,
   mergeForwardBatchSize: Schema.number().min(1).max(20).step(1)
     .default(5)
