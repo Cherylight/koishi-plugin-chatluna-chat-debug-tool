@@ -45,6 +45,7 @@
   },
   "devDependencies": {
     "esbuild": "^0.27.5",
+    "koishi-plugin-chatluna": "1.4.0",
     "typescript": "^6.0.2"
   },
   "scripts": {
